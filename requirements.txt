@@ -1,0 +1,10 @@
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
+# Gmail (Notre Dame)
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.120.0
+# Microsoft Graph (Johns Hopkins)
+msal>=1.28.0
+requests>=2.31.0
