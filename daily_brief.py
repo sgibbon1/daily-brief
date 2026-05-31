@@ -59,13 +59,11 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # Obsidian vault
 VAULT_TODAY_PATH = os.getenv("VAULT_TODAY_PATH", "")
-CARRYOVER_PATH = (
-    Path(VAULT_TODAY_PATH).parent / "brief_carryover.md"
-    if VAULT_TODAY_PATH else None
-)
 
-MAX_BODY_CHARS = 4000   # chars sent to Claude per email
-BATCH_SIZE = 8          # emails per Claude call
+MAX_BODY_CHARS = 4_000          # chars sent to Claude for regular emails
+MAX_BODY_CHARS_TRUSTED = 20_000  # chars sent to Claude for trusted newsletter senders
+MAX_BODY_CHARS_FETCH = 20_000   # max chars fetched per email (safety cap)
+BATCH_SIZE = 8                   # emails per Claude call
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Topic definitions
@@ -130,11 +128,13 @@ KEYWORDS: dict[str, list[str]] = {
 TRUSTED_SENDERS: dict[str, str] = {
     # sender substring (lowercased) → topic bucket
     # --- Strategic analysis & foreign policy ---
-    "newsletters@e.econo":          "Economic Competition & Geopolitics",   # The Economist
-    "economist.com":                "Economic Competition & Geopolitics",
-    "newsletter@warontherocks.com": "National Security & Defense Technology",  # War on the Rocks
-    "warontherocks.com":            "National Security & Defense Technology",
-    "newsletters@foreignpolicy.com":"National Security & Defense Technology",  # Foreign Policy (all accts)
+    "newsletters@e.econo":          "Economic Competition & Geopolitics",      # The Economist newsletters
+    "noreply@e.economist.com":      "Economic Competition & Geopolitics",      # The Economist (noreply variant)
+    "economist.com":                "Economic Competition & Geopolitics",      # The Economist (catch-all)
+    "newsletter@warontherocks.com": "National Security & Defense Technology",  # War on the Rocks (daily)
+    "cogsofwar@warontherocks.com":  "National Security & Defense Technology",  # War on the Rocks (Cogs of War)
+    "warontherocks.com":            "National Security & Defense Technology",  # War on the Rocks (catch-all)
+    "newsletters@foreignpolicy.com":"National Security & Defense Technology",  # Foreign Policy
     "newsletters@foreig":           "National Security & Defense Technology",
     "fpevents@foreignpolicy.com":   "National Security & Defense Technology",
     "lawfaremedia.org":             "National Security & Defense Technology",  # Lawfare
@@ -147,6 +147,8 @@ TRUSTED_SENDERS: dict[str, str] = {
     "breakingdefense.com":          "National Security & Defense Technology",
     "defenseone.com":               "National Security & Defense Technology",  # Defense One
     "c4isrnet.com":                 "National Security & Defense Technology",  # C4ISRNET
+    # --- Policy newsletters (broad coverage) ---
+    "politico.com":                 "National Security & Defense Technology",  # All POLITICO newsletters
     # --- Russia / Ukraine ---
     "support@kyivpost.com":         "Russia, Ukraine & Eastern Europe",        # Kyiv Post
     "kyivpost.com":                 "Russia, Ukraine & Eastern Europe",
@@ -158,11 +160,11 @@ TRUSTED_SENDERS: dict[str, str] = {
     "meduza.io":                    "Russia, Ukraine & Eastern Europe",        # Meduza
     # --- AI & tech newsletters ---
     "dan@tldrnewsletter.com":       "Artificial Intelligence & Emerging Technology",  # TLDR AI
-    "tldrnewsletter.com":           "Artificial Intelligence & Emerging Technology",
+    "tldrnewsletter.com":           "Artificial Intelligence & Emerging Technology",  # TLDR (catch-all)
     "wpintelligence@washingt":      "Artificial Intelligence & Emerging Technology",  # WP Intelligence
+    "lesserwrong.com":              "Artificial Intelligence & Emerging Technology",  # LessWrong (no-reply@lesserwrong.com)
     # --- Geopolitics / economics ---
     "foreignaffairs.com":           "Economic Competition & Geopolitics",      # Foreign Affairs
-    "economist.com":                "Economic Competition & Geopolitics",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -281,7 +283,7 @@ def fetch_gmail_emails(service, since: datetime, until: datetime) -> list[dict]:
             "subject": decode_mime_words(headers.get("Subject", "(no subject)")),
             "sender": headers.get("From", "Unknown"),
             "date": date,
-            "body": _extract_gmail_body(msg["payload"])[:MAX_BODY_CHARS],
+            "body": _extract_gmail_body(msg["payload"])[:MAX_BODY_CHARS_FETCH],
             "link": f"https://mail.google.com/mail/u/0/#inbox/{ref['id']}",
             "_service": service,
         })
@@ -398,7 +400,7 @@ def fetch_jhu_emails(since: datetime, until: datetime) -> list[dict]:
                 "subject": msg.get("subject", "(no subject)"),
                 "sender": sender,
                 "date": date,
-                "body": body_content[:MAX_BODY_CHARS],
+                "body": body_content[:MAX_BODY_CHARS_FETCH],
                 "link": msg.get("webLink", ""),
             })
         url = data.get("@odata.nextLink")
@@ -446,6 +448,7 @@ You receive a numbered batch of emails. For each, decide whether it contains sub
 
 Rules:
 - Err toward inclusion when there is genuine substantive content; exclude newsletters with only passing mentions.
+- Emails tagged [TRUSTED SOURCE] are from curated intelligence, policy, or technology publications that reliably cover these topics. Include them unless the specific issue is genuinely off-topic for all five areas. Err strongly toward inclusion for these.
 - Summaries should stand alone — a reader who never sees the email should come away fully informed.
 - Write with analytical precision: no filler phrases, no hedging without cause.
 - Return only the JSON array. No prose before or after it."""
@@ -458,13 +461,16 @@ def summarize_batch(batch: list[dict], client: anthropic.Anthropic) -> list[dict
             date_str = e["date"].strftime("%B %d, %Y %H:%M UTC")
         except Exception:
             date_str = "Unknown"
+        is_trusted = bool(keyword_match(e))
+        trusted_tag = " [TRUSTED SOURCE]" if is_trusted else ""
+        body_limit = MAX_BODY_CHARS_TRUSTED if is_trusted else MAX_BODY_CHARS
         email_blocks.append(
-            f"EMAIL {i}\n"
+            f"EMAIL {i}{trusted_tag}\n"
             f"From: {e['sender']}\n"
             f"Subject: {e['subject']}\n"
             f"Date: {date_str}\n"
             f"Account: {e['account']}\n"
-            f"---\n{e['body']}\n"
+            f"---\n{e['body'][:body_limit]}\n"
         )
 
     response = client.messages.create(
@@ -767,12 +773,37 @@ def main() -> None:
             print("No emails cleared the relevance bar. No brief generated.")
             continue
 
-        # Pull in any unread items carried over from the previous day
+        # Pull in any unread items carried over from the previous day.
+        # Primary: read from Today.md's existing ## Daily Intelligence Brief section
+        # (injected at 6am by daily.py --generate). Fallback: carryover file if
+        # daily.py hasn't run yet (e.g. machine woke up late).
         carryover_text = ""
-        if is_today and CARRYOVER_PATH and CARRYOVER_PATH.exists():
-            carryover_text = CARRYOVER_PATH.read_text(encoding="utf-8")
-            CARRYOVER_PATH.unlink()
-            print(f"  ↩ Prepending unread items from previous day.")
+        if is_today and VAULT_TODAY_PATH:
+            today_path = Path(VAULT_TODAY_PATH)
+            if today_path.exists():
+                today_md = today_path.read_text(encoding="utf-8")
+                m = re.search(
+                    r"## Daily Intelligence Brief\n\n(.*?)(?=\n## |\Z)",
+                    today_md, re.DOTALL,
+                )
+                if m:
+                    existing_body = m.group(1).strip()
+                    date_m2 = re.search(r"^\*(\d+) unread from (.+?)\*$", existing_body, re.MULTILINE)
+                    if date_m2:
+                        date_label = date_m2.group(2)
+                        carryover_body = re.sub(
+                            r"^\*\d+ unread from .+?\*\n\n?", "", existing_body
+                        ).strip()
+                        n_carry = len(re.findall(r"^- \[ \]", carryover_body, re.MULTILINE))
+                        carryover_text = f"<!-- carryover_date: {date_label} -->\n{carryover_body}"
+                        print(f"  ↩ Prepending {n_carry} unread item(s) from {date_label}.")
+        # Fallback: carryover file still present (daily.py --generate hasn't run yet)
+        if not carryover_text and VAULT_TODAY_PATH:
+            fallback = Path(VAULT_TODAY_PATH).parent / "brief_carryover.md"
+            if fallback.exists():
+                carryover_text = fallback.read_text(encoding="utf-8")
+                fallback.unlink()
+                print(f"  ↩ Prepending unread items from carryover file (fallback).")
 
         # Write dated brief to output/
         brief = format_brief(relevant, run_date, carryover_text)
