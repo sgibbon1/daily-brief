@@ -142,13 +142,21 @@ Set `VAULT_TODAY_PATH` in `.env` to the absolute path of your `_inbox/Today.md`.
 
 ## Automating it daily
 
-A cron job runs every evening at 5:00 PM:
+The brief runs at **5:00 PM daily** via launchd (`com.seang.daily-brief`).
 
-```
-0 17 * * * cd "/Users/seanmgibbons/Library/CloudStorage/GoogleDrive-sgibbons303@gmail.com/My Drive/Sean/Code/ai_code/daily_brief" && /usr/bin/python3 daily_brief.py >> output/cron.log 2>&1
-```
+**How it works:** launchd fires `~/scripts/run_daily_brief.sh`, which `cd`s into the project directory and calls `python3 daily_brief.py`. Using a bash wrapper is necessary because `/bin/bash` (not python3) needs macOS Full Disk Access to reach the Google Drive path.
 
-To verify it's installed: `crontab -l`
+**Plist:** `~/Library/LaunchAgents/com.seang.daily-brief.plist`  
+**Wrapper:** `~/scripts/run_daily_brief.sh`  
+**Log:** `~/scripts/daily_brief_launchd.log`
+
+**Prerequisite:** `/bin/bash` must be in System Settings → Privacy & Security → Full Disk Access.
+
+To reload after editing the plist:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.seang.daily-brief.plist
+launchctl load   ~/Library/LaunchAgents/com.seang.daily-brief.plist
+```
 
 ---
 
