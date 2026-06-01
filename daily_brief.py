@@ -564,8 +564,6 @@ def format_brief(relevant: list[dict], today: datetime, carryover_text: str = ""
         "",
         f"*Generated {datetime.now().strftime('%H:%M')} | {len(relevant)} relevant email{'s' if len(relevant) != 1 else ''}{carryover_note}*",
         "",
-        "---",
-        "",
     ]
 
     # Prepend carried-over unread items inline (no separate section header)
