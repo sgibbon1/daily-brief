@@ -665,6 +665,13 @@ def get_missing_dates(output_dir: Path, max_lookback: int = 7) -> list[datetime]
     brief in output_dir, from the day after the most recent brief up to today.
     Looks back at most max_lookback days so a long offline stretch doesn't
     trigger a massive catch-up.
+
+    NOTE: the dated output/brief_YYYY-MM-DD.md files are the run-state ledger,
+    not disposable output. Their presence is how we know a given day already
+    ran (skip it) vs. was missed (back-fill it, e.g. after opening the laptop
+    late). The brief itself also lives in Today.md, but do NOT stop writing the
+    output/ copies — deleting them would make every run re-post already-covered
+    days. They're gitignored, so they stay local.
     """
     today = datetime.now().date()  # local date, not UTC
     floor = today - timedelta(days=max_lookback - 1)
@@ -803,7 +810,9 @@ def main() -> None:
                 fallback.unlink()
                 print(f"  ↩ Prepending unread items from carryover file (fallback).")
 
-        # Write dated brief to output/
+        # Write dated brief to output/ — this file is the run-state ledger
+        # (see get_missing_dates); keep it even though the brief also goes in
+        # Today.md, or catch-up detection breaks.
         brief = format_brief(relevant, run_date, carryover_text)
         outfile = OUTPUT_DIR / f"brief_{run_date.strftime('%Y-%m-%d')}.md"
         outfile.write_text(brief, encoding="utf-8")
