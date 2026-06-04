@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
@@ -36,6 +37,11 @@ CREDENTIALS_DIR = SCRIPT_DIR / "credentials"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 CREDENTIALS_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Retry count for Google API network calls. These runs fire on wake-from-sleep
+# (launchd), when the network is often briefly flaky, so transient socket errors
+# are common; num_retries adds exponential backoff so a blip doesn't abort a run.
+API_RETRIES = 5
 
 # Gmail (ND)
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
@@ -263,14 +269,14 @@ def fetch_gmail_emails(service, since: datetime, until: datetime) -> list[dict]:
     until_str = until.strftime("%Y/%m/%d")
     result = service.users().messages().list(
         userId="me", q=f"after:{date_str} before:{until_str}", maxResults=200
-    ).execute()
+    ).execute(num_retries=API_RETRIES)
     messages = result.get("messages", [])
 
     emails = []
     for ref in messages:
         msg = service.users().messages().get(
             userId="me", id=ref["id"], format="full"
-        ).execute()
+        ).execute(num_retries=API_RETRIES)
         headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
         try:
             date = parsedate_to_datetime(headers.get("Date", ""))
@@ -293,10 +299,15 @@ def fetch_gmail_emails(service, since: datetime, until: datetime) -> list[dict]:
 def mark_gmail_read(service, ids: list[str]) -> None:
     if not ids:
         return
+    # num_retries gives googleapiclient built-in exponential backoff on transient
+    # socket errors (ConnectionResetError / read timeouts). This is the LAST step
+    # of a run, after the brief is already in Today.md — without retries a single
+    # wake-from-sleep network blip here crashed the script and left every briefed
+    # email unread (the exact symptom we saw on Jun 1 / Jun 3). See API_RETRIES.
     service.users().messages().batchModify(
         userId="me",
         body={"ids": ids, "removeLabelIds": ["UNREAD"]},
-    ).execute()
+    ).execute(num_retries=API_RETRIES)
     print(f"  ✓ Marked {len(ids)} ND Gmail messages as read.")
 
 
@@ -414,11 +425,21 @@ def mark_jhu_read(ids: list[str]) -> None:
     token = get_jhu_access_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     for msg_id in ids:
-        requests.patch(
-            f"{GRAPH_BASE}/me/messages/{msg_id}",
-            headers=headers,
-            json={"isRead": True},
-        )
+        # Retry transient network errors with backoff, mirroring the Gmail path —
+        # these runs fire on wake-from-sleep and the network is often briefly flaky.
+        for attempt in range(API_RETRIES):
+            try:
+                requests.patch(
+                    f"{GRAPH_BASE}/me/messages/{msg_id}",
+                    headers=headers,
+                    json={"isRead": True},
+                    timeout=30,
+                ).raise_for_status()
+                break
+            except requests.RequestException:
+                if attempt == API_RETRIES - 1:
+                    raise
+                time.sleep(2 ** attempt)
     print(f"  ✓ Marked {len(ids)} JHU emails as read.")
 
 
@@ -824,14 +845,26 @@ def main() -> None:
         elif not is_today:
             print(f"  (catch-up date — skipping Today.md insert)")
 
-        # Mark relevant emails as read
+        # Mark relevant emails as read.
+        # Belt-and-suspenders: mark_gmail_read already retries the API call, but
+        # we also catch here so that if marking still fails it can't crash the
+        # whole run. The brief + ledger file are already written, so a crash here
+        # would (a) abort any remaining catch-up dates in this loop and (b) leave
+        # this day recorded as done with its emails still unread and no retry. A
+        # loud warning is better than a hard failure.
         nd_ids = [e["id"] for e in relevant if "ND Alumni" in e.get("account", "")]
         if nd_ids and gmail_service:
-            mark_gmail_read(gmail_service, nd_ids)
+            try:
+                mark_gmail_read(gmail_service, nd_ids)
+            except Exception as exc:
+                print(f"  ⚠ Could not mark {len(nd_ids)} ND emails read: {exc}")
 
         jhu_ids = [e["id"] for e in relevant if "JHU Alumni" in e.get("account", "")]
         if jhu_ids:
-            mark_jhu_read(jhu_ids)
+            try:
+                mark_jhu_read(jhu_ids)
+            except Exception as exc:
+                print(f"  ⚠ Could not mark {len(jhu_ids)} JHU emails read: {exc}")
 
     print("\nAll done.")
 
