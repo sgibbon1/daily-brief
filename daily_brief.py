@@ -573,17 +573,73 @@ def _format_email_block(e: dict) -> list[str]:
     return lines
 
 
+def _parse_carryover_items(carryover_text: str) -> list[dict]:
+    """Parse a carried-over brief body back into individual items by category.
+
+    Returns [{"category": <topic name or None>, "lines": [block lines]}], oldest
+    first. This is what lets us *re-consolidate*: each item is re-tagged with its
+    category by NAME (the heading's `#` depth is ignored, which is what stops the
+    ##→###→######  drift), then merged with today's emails under one heading each.
+
+    Only UNCHECKED ('- [ ]') items are kept — a checked ('- [x]') item has been
+    read, so it drops out instead of piling up across days. (This mirrors what
+    daily.py --generate already does when it carries items into the morning note.)
+    """
+    if not carryover_text:
+        return []
+    body = re.sub(r"<!--.*?-->\n?", "", carryover_text)          # drop carryover_date marker
+    body = re.sub(r"^\*\d+ (?:unread|carried over) from .+?\*\s*$", "", body, flags=re.MULTILINE)
+
+    lines = body.splitlines()
+    items: list[dict] = []
+    current_cat: str | None = None
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        heading = re.match(r"^#{1,6}\s+(.*\S)\s*$", line)
+        if heading:
+            text = heading.group(1).strip()
+            if not text.lower().startswith("daily intelligence brief"):
+                # Match by name; anything not a known topic (e.g. "Other Relevant") → None
+                current_cat = text if text in TOPICS else None
+            i += 1
+            continue
+        item = re.match(r"^- \[( |x)\] ", line)
+        if item:
+            checked = item.group(1) == "x"
+            block = [line]
+            i += 1
+            # Gather the item body until the next item, heading, or end of input.
+            while i < n and not re.match(r"^- \[( |x)\] ", lines[i]) \
+                    and not re.match(r"^#{1,6}\s+\S", lines[i]):
+                block.append(lines[i])
+                i += 1
+            while block and block[-1].strip() in ("", "---"):   # trim trailing rule/blank
+                block.pop()
+            if not checked and block:
+                items.append({"category": current_cat, "lines": block})
+            continue
+        i += 1
+    return items
+
+
+def _subject_key(block_first_line: str) -> str:
+    """Dedup key for an item: its bold subject text, lowercased."""
+    m = re.search(r"\*\*(.+?)\*\*", block_first_line)
+    return (m.group(1) if m else block_first_line).strip().lower()
+
+
 def format_brief(relevant: list[dict], today: datetime, carryover_text: str = "") -> str:
     date_str = today.strftime("%B %d, %Y")
-    carryover_note = ""
-    carryover_body = ""
-    if carryover_text:
-        date_m = re.search(r"<!-- carryover_date: (.+?) -->", carryover_text)
-        date_label = date_m.group(1) if date_m else "previous day"
-        carryover_body = re.sub(r"<!--.*?-->\n?", "", carryover_text).strip()
-        # Count unread items
-        n_carry = len(re.findall(r"^- \[ \]", carryover_body, re.MULTILINE))
-        carryover_note = f" · {n_carry} unread from {date_label}"
+
+    # Re-consolidate: pull carried-over items back into structured form so they
+    # merge into the SAME category headings as today's emails (no repeated
+    # headings, no heading drift).
+    carryover_items = _parse_carryover_items(carryover_text)
+    date_m = re.search(r"<!-- carryover_date: (.+?) -->", carryover_text or "")
+    date_label = date_m.group(1) if date_m else "previous day"
+    n_carry = len(carryover_items)
+    carryover_note = f" · {n_carry} unread from {date_label}" if n_carry else ""
 
     lines = [
         f"# Daily Intelligence Brief — {date_str}",
@@ -592,35 +648,43 @@ def format_brief(relevant: list[dict], today: datetime, carryover_text: str = ""
         "",
     ]
 
-    # Prepend carried-over unread items inline (no separate section header)
-    if carryover_body:
-        lines += [carryover_body, "", "---", ""]
+    # Each bucket holds bare block-line-lists (no trailing separator); the
+    # renderer adds one separator between items so spacing stays uniform whether
+    # a block came from today's fetch or from the carryover.
+    by_topic: dict[str, list[list[str]]] = {t: [] for t in TOPICS}
+    other: list[list[str]] = []
+    seen: set[str] = set()
 
-    by_topic: dict[str, list[dict]] = {t: [] for t in TOPICS}
-    uncategorized: list[dict] = []
+    def _place(block: list[str], category: str | None) -> None:
+        key = _subject_key(block[0]) if block else ""
+        if not block or key in seen:
+            return
+        seen.add(key)
+        (by_topic[category] if category in by_topic else other).append(block)
 
+    # Today's new emails first (freshest on top), then the carried-over backlog.
     for e in relevant:
-        placed = False
-        for topic in e.get("topics", []):
-            if topic in by_topic:
-                by_topic[topic].append(e)
-                placed = True
-                break
-        if not placed:
-            uncategorized.append(e)
+        block = _format_email_block(e)
+        while block and block[-1].strip() in ("", "---"):   # strip trailing separator
+            block.pop()
+        category = next((t for t in e.get("topics", []) if t in by_topic), None)
+        _place(block, category)
+
+    for it in carryover_items:
+        _place(it["lines"], it["category"])
+
+    def _emit(heading: str, blocks: list[list[str]]) -> list[str]:
+        out = [f"## {heading}", ""]
+        for b in blocks:
+            out += b
+            out += ["", "---", ""]
+        return out
 
     for topic in TOPICS:
-        entries = by_topic[topic]
-        if not entries:
-            continue
-        lines += [f"## {topic}", ""]
-        for e in entries:
-            lines += _format_email_block(e)
-
-    if uncategorized:
-        lines += ["## Other Relevant", ""]
-        for e in uncategorized:
-            lines += _format_email_block(e)
+        if by_topic[topic]:
+            lines += _emit(topic, by_topic[topic])
+    if other:
+        lines += _emit("Other Relevant", other)
 
     return "\n".join(lines)
 
