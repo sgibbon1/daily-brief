@@ -267,8 +267,11 @@ def _extract_gmail_body(payload: dict) -> str:
 def fetch_gmail_emails(service, since: datetime, until: datetime) -> list[dict]:
     date_str = since.strftime("%Y/%m/%d")
     until_str = until.strftime("%Y/%m/%d")
+    # `is:unread` restricts the brief to mail Sean hasn't read yet. Already-read
+    # mail is skipped, and the run marks everything it processes as read at the
+    # end — so each brief only ever covers genuinely new messages.
     result = service.users().messages().list(
-        userId="me", q=f"after:{date_str} before:{until_str}", maxResults=200
+        userId="me", q=f"is:unread after:{date_str} before:{until_str}", maxResults=200
     ).execute(num_retries=API_RETRIES)
     messages = result.get("messages", [])
 
@@ -377,9 +380,11 @@ def fetch_jhu_emails(since: datetime, until: datetime) -> list[dict]:
 
     since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     until_iso = until.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # `isRead eq false` is the Graph equivalent of Gmail's is:unread — restrict
+    # the brief to messages Sean hasn't read yet (the run marks them read at the end).
     url = (
         f"{GRAPH_BASE}/me/mailFolders/inbox/messages"
-        f"?$filter=receivedDateTime ge {since_iso} and receivedDateTime lt {until_iso}"
+        f"?$filter=isRead eq false and receivedDateTime ge {since_iso} and receivedDateTime lt {until_iso}"
         f"&$select=id,subject,from,receivedDateTime,body,webLink"
         f"&$top=100"
     )
