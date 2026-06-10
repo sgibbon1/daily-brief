@@ -20,6 +20,14 @@ from pathlib import Path
 
 import anthropic
 import requests
+
+# Token-usage logger (shared copy in each project). Degrade to a no-op if the
+# module is missing so logging can never break a run.
+try:
+    from usage_log import log_usage
+except Exception:  # pragma: no cover
+    def log_usage(*a, **k):
+        pass
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
@@ -517,6 +525,9 @@ def summarize_batch(batch: list[dict], client: anthropic.Anthropic) -> list[dict
             }
         ],
     )
+
+    log_usage(response, project="daily_brief", script="daily_brief.py",
+              model="claude-sonnet-4-6", label="summarize")
 
     raw = response.content[0].text.strip()
     # Strip markdown code fences if model wraps output
