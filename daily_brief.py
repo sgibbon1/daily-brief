@@ -21,13 +21,9 @@ from pathlib import Path
 import anthropic
 import requests
 
-# Token-usage logger (shared copy in each project). Degrade to a no-op if the
-# module is missing so logging can never break a run.
-try:
-    from usage_log import log_usage
-except Exception:  # pragma: no cover
-    def log_usage(*a, **k):
-        pass
+# Provider-agnostic completion (Anthropic or Gemini, chosen by AI_PROVIDER in
+# .env) with built-in token-usage logging.
+from llm import complete, AI_PROVIDER
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
@@ -488,7 +484,7 @@ Rules:
 - Return only the JSON array. No prose before or after it."""
 
 
-def summarize_batch(batch: list[dict], client: anthropic.Anthropic) -> list[dict]:
+def summarize_batch(batch: list[dict]) -> list[dict]:
     email_blocks = []
     for i, e in enumerate(batch):
         try:
@@ -507,42 +503,26 @@ def summarize_batch(batch: list[dict], client: anthropic.Anthropic) -> list[dict
             f"---\n{e['body'][:body_limit]}\n"
         )
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
+    raw = complete(
+        system=SYSTEM_PROMPT,
+        user="Assess and summarize the following emails:\n\n" + "\n\n".join(email_blocks),
         max_tokens=4096,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": "Assess and summarize the following emails:\n\n"
-                + "\n\n".join(email_blocks),
-            }
-        ],
-    )
-
-    log_usage(response, project="daily_brief", script="daily_brief.py",
-              model="claude-sonnet-4-6", label="summarize")
-
-    raw = response.content[0].text.strip()
+        anthropic_model="claude-sonnet-4-6",
+        project="daily_brief", script="daily_brief.py", label="summarize",
+    ).strip()
     # Strip markdown code fences if model wraps output
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
     return json.loads(raw)
 
 
-def summarize_all(candidates: list[dict], client: anthropic.Anthropic) -> list[dict]:
+def summarize_all(candidates: list[dict]) -> list[dict]:
     relevant = []
     for start in range(0, len(candidates), BATCH_SIZE):
         batch = candidates[start : start + BATCH_SIZE]
         end = min(start + len(batch), len(candidates))
         print(f"  Summarizing emails {start + 1}–{end} of {len(candidates)}...")
-        results = summarize_batch(batch, client)
+        results = summarize_batch(batch)
         for res in results:
             idx = res.get("email_index", 0)
             if res.get("relevant") and idx < len(batch):
@@ -807,10 +787,14 @@ def get_missing_dates(output_dir: Path, max_lookback: int = 7) -> list[datetime]
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    if not ANTHROPIC_API_KEY:
+    # Provider key check (AI_PROVIDER selects Anthropic [default] or Gemini).
+    if AI_PROVIDER == "gemini":
+        if not os.environ.get("GEMINI_API_KEY"):
+            print("ERROR: AI_PROVIDER=gemini but GEMINI_API_KEY not set in .env")
+            sys.exit(1)
+    elif not ANTHROPIC_API_KEY:
         print("ERROR: ANTHROPIC_API_KEY not set in .env")
         sys.exit(1)
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     today_date = datetime.now().date()  # local date, not UTC
 
@@ -872,7 +856,7 @@ def main() -> None:
             continue
 
         print(f"Summarizing {len(candidates)} candidates with Claude...")
-        relevant = summarize_all(candidates, client)
+        relevant = summarize_all(candidates)
         print(f"Deemed substantively relevant: {len(relevant)}")
 
         if not relevant:

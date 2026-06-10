@@ -32,6 +32,8 @@ USAGE_LOG = Path(os.environ.get("AI_USAGE_LOG", _DEFAULT_LOG))
 # $ per 1,000,000 tokens, as (input, output). Cache-write tokens bill at 1.25×
 # input and cache-read tokens at 0.10× input (Anthropic's prompt-cache rates).
 # Keys are matched as a PREFIX so date-suffixed ids (…-20251001) still resolve.
+# Gemini rows are APPROXIMATE paid rates for reference — on the free tier actual
+# cost is $0, but the token counts are still logged.
 _PRICES = {
     "claude-opus-4-7":   (5.0, 25.0),
     "claude-opus-4-6":   (5.0, 25.0),
@@ -39,6 +41,11 @@ _PRICES = {
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-sonnet-4-5": (3.0, 15.0),
     "claude-haiku-4-5":  (1.0,  5.0),
+    "gemini-2.5-pro":    (1.25, 10.0),   # approx paid; free tier = $0
+    "gemini-2.5-flash":  (0.30,  2.50),  # approx paid; free tier = $0
+    "gemini-2.0-flash":  (0.10,  0.40),  # approx paid; free tier = $0
+    "gemini-1.5-pro":    (1.25,  5.0),   # approx paid; free tier = $0
+    "gemini-1.5-flash":  (0.075, 0.30),  # approx paid; free tier = $0
 }
 
 _FIELDS = [
