@@ -87,6 +87,17 @@ TOPICS = [
     "Economic Competition & Geopolitics",
 ]
 
+# Tie-break order for emails Claude tags with 2+ topics, and the section order
+# in the rendered brief. Without this, the topic that wins a tie is whichever
+# one happens to be listed first in Claude's (arbitrary) "topics" array.
+TOPIC_PRIORITY = [
+    "Artificial Intelligence & Emerging Technology",
+    "National Security & Defense Technology",
+    "China & Indo-Pacific Competition",
+    "Economic Competition & Geopolitics",
+    "Russia, Ukraine & Eastern Europe",
+]
+
 KEYWORDS: dict[str, list[str]] = {
     "Artificial Intelligence & Emerging Technology": [
         "artificial intelligence", " ai ", "machine learning", "llm", "large language model",
@@ -144,19 +155,19 @@ TRUSTED_SENDERS: dict[str, str] = {
     "newsletter@warontherocks.com": "National Security & Defense Technology",  # War on the Rocks (daily)
     "cogsofwar@warontherocks.com":  "National Security & Defense Technology",  # War on the Rocks (Cogs of War)
     "warontherocks.com":            "National Security & Defense Technology",  # War on the Rocks (catch-all)
-    "newsletters@foreignpolicy.com":"National Security & Defense Technology",  # Foreign Policy
-    "newsletters@foreig":           "National Security & Defense Technology",
-    "fpevents@foreignpolicy.com":   "National Security & Defense Technology",
     "lawfaremedia.org":             "National Security & Defense Technology",  # Lawfare
     "rusi.org":                     "National Security & Defense Technology",  # RUSI
     "csis.org":                     "National Security & Defense Technology",  # CSIS
     "cfr.org":                      "National Security & Defense Technology",  # CFR
     "rand.org":                     "National Security & Defense Technology",  # RAND
+    # --- China & Indo-Pacific ---
+    "thewirechina.com":             "China & Indo-Pacific Competition",        # The Wire China (economy/business)
+    "chinatalk@substack.com":       "China & Indo-Pacific Competition",        # ChinaTalk (Jordan Schneider)
+    "chinai@substack.com":          "China & Indo-Pacific Competition",        # ChinAI Newsletter (Jeffrey Ding)
     # --- Defense & tech reporting ---
     "newsletters@breakingde":       "National Security & Defense Technology",  # Breaking Defense
     "breakingdefense.com":          "National Security & Defense Technology",
     "defenseone.com":               "National Security & Defense Technology",  # Defense One
-    "c4isrnet.com":                 "National Security & Defense Technology",  # C4ISRNET
     # --- Policy newsletters (broad coverage) ---
     "politico.com":                 "National Security & Defense Technology",  # All POLITICO newsletters
     # --- Russia / Ukraine ---
@@ -173,6 +184,7 @@ TRUSTED_SENDERS: dict[str, str] = {
     "tldrnewsletter.com":           "Artificial Intelligence & Emerging Technology",  # TLDR (catch-all)
     "wpintelligence@washingt":      "Artificial Intelligence & Emerging Technology",  # WP Intelligence
     "lesserwrong.com":              "Artificial Intelligence & Emerging Technology",  # LessWrong (no-reply@lesserwrong.com)
+    "thezvi@substack.com":          "Artificial Intelligence & Emerging Technology",  # Don't Worry About the Vase (Zvi Mowshowitz)
     # --- Geopolitics / economics ---
     "foreignaffairs.com":           "Economic Competition & Geopolitics",      # Foreign Affairs
 }
@@ -658,7 +670,8 @@ def format_brief(relevant: list[dict], today: datetime, carryover_text: str = ""
         block = _format_email_block(e)
         while block and block[-1].strip() in ("", "---"):   # strip trailing separator
             block.pop()
-        category = next((t for t in e.get("topics", []) if t in by_topic), None)
+        e_topics = e.get("topics", [])
+        category = next((t for t in TOPIC_PRIORITY if t in e_topics), None)
         _place(block, category)
 
     for it in carryover_items:
@@ -671,7 +684,7 @@ def format_brief(relevant: list[dict], today: datetime, carryover_text: str = ""
             out += ["", "---", ""]
         return out
 
-    for topic in TOPICS:
+    for topic in TOPIC_PRIORITY:
         if by_topic[topic]:
             lines += _emit(topic, by_topic[topic])
     if other:
