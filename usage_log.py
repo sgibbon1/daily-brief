@@ -21,12 +21,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Central, cross-project log. Lives at the ai_code root (outside every git repo),
-# so it is never committed. Override with AI_USAGE_LOG if the path moves.
-_DEFAULT_LOG = (
-    "/Users/yourname/Library/CloudStorage/GoogleDrive-your.email@example.com"
-    "/My Drive/Sean/Code/ai_code/token_usage.csv"
-)
+# Central, cross-project log. Lives at the ai_code root (one level up from this
+# project's own folder, outside every git repo, so it is never committed) —
+# resolved relative to this file so no machine-specific path is hardcoded.
+# Override with AI_USAGE_LOG if you want the log somewhere else entirely.
+_DEFAULT_LOG = Path(__file__).resolve().parent.parent / "token_usage.csv"
 USAGE_LOG = Path(os.environ.get("AI_USAGE_LOG", _DEFAULT_LOG))
 
 # $ per 1,000,000 tokens, as (input, output). Cache-write tokens bill at 1.25×

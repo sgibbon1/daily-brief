@@ -3,6 +3,12 @@
 # ## Notes, daily_brief writes ## Daily Intelligence Brief). On a late wake both
 # missed jobs fire at once, so serialize them here to avoid a read-modify-write
 # clobber of Today.md. email_scan is idempotent, so re-running it is safe.
+#
+# Paths below are resolved relative to this script's own location, so no
+# machine-specific absolute path needs editing — clone this repo as a sibling
+# of `seanipedia/` under the same parent folder and it works as-is.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AI_CODE_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Wait for the network before hitting IMAP / Gmail API / Anthropic. This job
 # fires at 17:00, but if that was missed it runs on wake-from-sleep when DNS is
@@ -24,8 +30,8 @@ for i in $(seq 1 60); do
     sleep 5
 done
 
-/usr/bin/python3 "/Users/yourname/Library/CloudStorage/GoogleDrive-your.email@example.com/My Drive/Sean/Code/ai_code/seanipedia/email_scan.py" \
-  >> "/Users/yourname/Library/Logs/email-scan.log" 2>&1
+/usr/bin/python3 "$AI_CODE_DIR/seanipedia/email_scan.py" \
+  >> "$HOME/Library/Logs/email-scan.log" 2>&1
 
-cd "/Users/yourname/Library/CloudStorage/GoogleDrive-your.email@example.com/My Drive/Sean/Code/ai_code/daily_brief"
+cd "$SCRIPT_DIR"
 /usr/bin/python3 daily_brief.py >> output/cron.log 2>&1
