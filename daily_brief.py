@@ -23,7 +23,7 @@ import requests
 
 # Provider-agnostic completion (Anthropic or Gemini, chosen by AI_PROVIDER in
 # .env) with built-in token-usage logging.
-from llm import complete, AI_PROVIDER
+from llm import complete, get_ai_provider
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
@@ -801,7 +801,7 @@ def get_missing_dates(output_dir: Path, max_lookback: int = 7) -> list[datetime]
 
 def main() -> None:
     # Provider key check (AI_PROVIDER selects Anthropic [default] or Gemini).
-    if AI_PROVIDER == "gemini":
+    if get_ai_provider() == "gemini":
         if not os.environ.get("GEMINI_API_KEY"):
             print("ERROR: AI_PROVIDER=gemini but GEMINI_API_KEY not set in .env")
             sys.exit(1)
