@@ -130,7 +130,7 @@ def _call_gemini(system: str, user: str, max_tokens: int, model: str, thinking_l
 
 def complete(*, system: str, user: str, max_tokens: int, anthropic_model: str,
              gemini_model: str | None = None, project: str, script: str,
-             label: str = "", max_retries: int = 6, thinking_level: str = "low") -> str:
+             label: str = "", max_retries: int = 8, thinking_level: str = "low") -> str:
     """Run one completion on the active provider; log usage; return the text.
 
     `anthropic_model` is used when AI_PROVIDER=anthropic; `gemini_model`
@@ -165,10 +165,20 @@ def complete(*, system: str, user: str, max_tokens: int, anthropic_model: str,
 
         except Exception as exc:  # retry transient rate/availability errors
             err = str(exc).lower()
+            # "error 500"/"high demand": Gemini returns capacity spikes as a
+            # plain 500 ("gemini-2.5-flash is currently experiencing high
+            # demand ... try again later") — crashed the 2026-07-22 brief run
+            # because none of the original markers matched a 500. Matching
+            # "error 500" (our own message prefix) not bare "500" so token
+            # counts etc. inside an error body can't false-positive.
             transient = any(s in err for s in
-                            ("rate", "429", "quota", "overloaded", "529", "503"))
+                            ("rate", "429", "quota", "overloaded", "529", "503",
+                             "error 500", "high demand", "internal server error"))
             if transient and attempt < max_retries - 1:
-                time.sleep(2 ** (attempt + 1))
+                # Cap at 60s per wait: 2,4,8,16,32,60,60 ≈ 3 minutes of total
+                # patience across 8 attempts — these are unattended nightly
+                # jobs, so waiting out a capacity spike beats crashing the run.
+                time.sleep(min(60, 2 ** (attempt + 1)))
                 continue
             raise
 
