@@ -104,22 +104,29 @@ def _log_gemini(resp_json: dict, model: str, project: str, script: str, label: s
     log_usage(_R(), project=project, script=script, model=model, label=label)
 
 
-def _call_gemini(system: str, user: str, max_tokens: int, model: str, thinking_level: str) -> dict:
+def _call_gemini(system: str, user: str, max_tokens: int, model: str,
+                 thinking_level: str, response_schema: dict | None) -> dict:
+    body = {
+        "model": model,
+        "system_instruction": system or None,
+        "input": user,
+        "generation_config": {
+            "max_output_tokens": max_tokens,
+            "thinking_level": thinking_level,
+        },
+    }
+    if response_schema:
+        # Server-side enforced JSON output. NOTE the shape: the Interactions
+        # API takes the JSON schema DIRECTLY as response_format (top-level
+        # "type": "array"/"object"), NOT wrapped in {"type": "json_schema"}.
+        body["response_format"] = response_schema
     resp = requests.post(
         _GEMINI_URL,
         headers={
             "Content-Type": "application/json",
             "x-goog-api-key": os.environ["GEMINI_API_KEY"],
         },
-        json={
-            "model": model,
-            "system_instruction": system or None,
-            "input": user,
-            "generation_config": {
-                "max_output_tokens": max_tokens,
-                "thinking_level": thinking_level,
-            },
-        },
+        json=body,
         timeout=120,
     )
     if resp.status_code >= 400:
@@ -130,7 +137,8 @@ def _call_gemini(system: str, user: str, max_tokens: int, model: str, thinking_l
 
 def complete(*, system: str, user: str, max_tokens: int, anthropic_model: str,
              gemini_model: str | None = None, project: str, script: str,
-             label: str = "", max_retries: int = 8, thinking_level: str = "low") -> str:
+             label: str = "", max_retries: int = 8, thinking_level: str = "low",
+             response_schema: dict | None = None) -> str:
     """Run one completion on the active provider; log usage; return the text.
 
     `anthropic_model` is used when AI_PROVIDER=anthropic; `gemini_model`
@@ -140,13 +148,21 @@ def complete(*, system: str, user: str, max_tokens: int, anthropic_model: str,
     "high". Use "minimal" for a trivial single-judgment call (a score, a
     classification) to guarantee max_tokens headroom for the actual answer —
     see the module docstring for why this matters on Gemini specifically.
+
+    `response_schema` (Gemini only): a JSON schema dict (top-level "type":
+    "array"/"object"). When set, Gemini ENFORCES valid JSON matching the
+    schema server-side — added after the 2026-07-22 brief run crashed on
+    malformed JSON (an unescaped quote in a long summary string). On the
+    Anthropic path this is ignored: prompt instructions handle format there,
+    and callers should keep their fence-stripping/parse guards for it.
     """
     gem_model = gemini_model or _default_gemini_model()
 
     for attempt in range(max_retries):
         try:
             if get_ai_provider() == "gemini":
-                resp_json = _call_gemini(system, user, max_tokens, gem_model, thinking_level)
+                resp_json = _call_gemini(system, user, max_tokens, gem_model,
+                                         thinking_level, response_schema)
                 _log_gemini(resp_json, gem_model, project, script, label)
                 return _gemini_output_text(resp_json)
 

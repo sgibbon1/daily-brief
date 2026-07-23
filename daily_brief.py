@@ -495,6 +495,25 @@ Rules:
 - Write with analytical precision: no filler phrases, no hedging without cause.
 - Return only the JSON array. No prose before or after it."""
 
+# Server-side enforced output shape for the Gemini path (llm.complete passes it
+# as the Interactions API's response_format). Added 2026-07-22 after a run
+# crashed on malformed JSON — an unescaped quote inside a long summary string.
+# The prompt's own JSON instructions still cover the Anthropic path.
+BATCH_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "email_index": {"type": "integer"},
+            "relevant": {"type": "boolean"},
+            "topics": {"type": "array", "items": {"type": "string"}},
+            "summary": {"type": "string"},
+            "significance": {"type": "string"},
+        },
+        "required": ["email_index", "relevant", "topics", "summary", "significance"],
+    },
+}
+
 
 def summarize_batch(batch: list[dict]) -> list[dict]:
     email_blocks = []
@@ -515,17 +534,29 @@ def summarize_batch(batch: list[dict]) -> list[dict]:
             f"---\n{e['body'][:body_limit]}\n"
         )
 
-    raw = complete(
-        system=SYSTEM_PROMPT,
-        user="Assess and summarize the following emails:\n\n" + "\n\n".join(email_blocks),
-        max_tokens=4096,
-        anthropic_model="claude-sonnet-4-6",
-        project="daily_brief", script="daily_brief.py", label="summarize",
-    ).strip()
-    # Strip markdown code fences if model wraps output
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    return json.loads(raw)
+    # One re-request on a parse failure: LLM output is nondeterministic, so a
+    # malformed response usually clears on a fresh call. A second failure
+    # raises — better to crash loudly (emails stay unread, tomorrow's run
+    # backfills) than to silently drop a batch.
+    last_err: Exception | None = None
+    for parse_attempt in range(2):
+        raw = complete(
+            system=SYSTEM_PROMPT,
+            user="Assess and summarize the following emails:\n\n" + "\n\n".join(email_blocks),
+            max_tokens=4096,
+            anthropic_model="claude-sonnet-4-6",
+            response_schema=BATCH_SCHEMA,
+            project="daily_brief", script="daily_brief.py", label="summarize",
+        ).strip()
+        # Strip markdown code fences if model wraps output
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            last_err = exc
+            print(f"  ⚠ Batch response failed to parse ({exc}) — re-requesting once...")
+    raise last_err
 
 
 def summarize_all(candidates: list[dict]) -> list[dict]:
