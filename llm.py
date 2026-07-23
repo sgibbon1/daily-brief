@@ -32,6 +32,7 @@ default) is fine for genuine synthesis work that benefits from more reasoning
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import requests
@@ -194,7 +195,14 @@ def complete(*, system: str, user: str, max_tokens: int, anthropic_model: str,
                 # Cap at 60s per wait: 2,4,8,16,32,60,60 ≈ 3 minutes of total
                 # patience across 8 attempts — these are unattended nightly
                 # jobs, so waiting out a capacity spike beats crashing the run.
-                time.sleep(min(60, 2 ** (attempt + 1)))
+                wait = min(60, 2 ** (attempt + 1))
+                # Gemini free-tier 429s include an explicit cooldown ("Please
+                # retry in 39.3s"). Honor it when it's longer than our backoff
+                # — retrying earlier just burns quota on a doomed attempt.
+                m = re.search(r"retry in ([0-9.]+)\s*s", err)
+                if m:
+                    wait = max(wait, min(90.0, float(m.group(1)) + 1.0))
+                time.sleep(wait)
                 continue
             raise
 
