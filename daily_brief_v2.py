@@ -105,20 +105,23 @@ def _sender_name(sender: str) -> str:
 # Stage 1 — ROUTE: relevance + topic + event flag (schema-enforced JSON)
 # ─────────────────────────────────────────────────────────────────────────────
 
-ROUTE_SYSTEM = """You triage incoming email for a DoD official's daily intelligence brief.
+ROUTE_SYSTEM = """You triage incoming email for a DoD official's daily intelligence brief. The bar for inclusion is a genuine GEOPOLITICAL, NATIONAL-SECURITY/INTELLIGENCE, or TECHNOLOGY nexus — nothing else belongs in this brief.
 
 For each email decide:
-1. relevant: does it have SUBSTANTIVE content on any of these areas (real coverage, not a passing mention)?
+1. relevant: does it have SUBSTANTIVE content (real coverage, not a passing mention) with a clear geopolitical, national-security/intelligence, or technology nexus? Map relevant email to the single best-fit area:
      - Artificial Intelligence & Emerging Technology
      - National Security & Defense Technology
      - China & Indo-Pacific Competition
      - Economic Competition & Geopolitics
      - Russia, Ukraine & Eastern Europe
-   Substantive-but-fits-none → topic "Other". Marketing/personal/pure-fundraising/logistics → relevant=false.
-2. topic: the single best-fit area name above, or "Other".
-3. is_event: does it announce a specific UPCOMING event (talk, panel, conference, briefing) a policy professional might attend — whether in-person or virtual? (Independent of relevance.)
+   STRONGLY prefer one of the five named areas — a nuclear/proliferation or Middle East security story is National Security & Defense Technology, a trade/sanctions story is Economic Competition, etc. Only fall back to "Other" when NO named area fits.
+   Use topic "Other" ONLY for email whose SUBSTANCE is geopolitical/intel/tech but genuinely fits none of the five areas — e.g. Latin America / Africa / Arctic security, space or cyber policy, nuclear proliferation dynamics outside the five regions, a novel emerging-tech domain. "Other" is a NARROW bucket, usually empty. It is NOT for: arts/literary/culture events (an FT Weekend Festival, a book festival), general-interest news digests, book/film reviews, or anything whose subject is not itself geopolitical/intel/tech. When unsure whether something belongs in "Other," it does NOT — set relevant=false.
+2. topic: the best-fit area, or "Other" (only per the rule above).
+3. is_event: does it announce a specific UPCOMING event a policy professional might attend (in-person or virtual)? (Independent of relevance.)
 
-Emails tagged [TRUSTED SOURCE] are curated intel/policy/tech publications — lean relevant.
+Set relevant=FALSE — do not force into "Other" — for anything WITHOUT that nexus, even if substantive and worth the reader's time: philosophy/ideas essays, personal finance (credit cards, student loans), religious/devotional readings, purely domestic partisan politics with no national-security angle, personal or lifestyle newsletters, marketing, logistics, fundraising. The reader keeps these unread in their own inbox as a to-do list; the brief must leave them alone.
+
+Emails tagged [TRUSTED SOURCE] are curated intel/policy/tech publications — lean relevant, but still require the nexus.
 
 Return ONLY a JSON array, one object per email in order:
 {"email_index": <int>, "relevant": <bool>, "topic": "<area or 'Other'>", "is_event": <bool>}."""
@@ -237,17 +240,34 @@ def _synth_block(e: dict) -> str:
             f"Subject: {e['subject']}\n---\n{e['body'][:limit]}\n")
 
 
-def _synth_call(topic: str, blocks: list[str], context: str, is_reduce: bool) -> str:
+# When a section covers many emails or a multi-day window (a missed-day catch-up
+# or the backlog), expand detail so specifics aren't compressed away. A normal
+# daily section stays tight.
+EXPAND_EMAIL_THRESHOLD = 8
+_EXPAND_NOTE = (
+    "\n\nNOTE: this section covers a LONGER-THAN-USUAL window (a multi-day catch-up "
+    "or backlog), so be more THOROUGH than a normal daily section — preserve the "
+    "important specifics (names, numbers, dates), use `### Subtopic` headings "
+    "generously to organize the larger volume, and do NOT drop a meaningful "
+    "development for brevity. Still trend-focused, just fuller.")
+
+
+def _synth_call(topic: str, blocks: list[str], context: str,
+                is_reduce: bool, expanded: bool) -> str:
     if is_reduce:
-        user = (f"TOPIC: {topic}\n\nMERGE these partial write-ups of today's coverage "
-                f"into one clean section. Remove repetition, KEEP every [E#] tag "
-                f"citation.\n\nPARTIALS:\n\n" + "\n\n---\n\n".join(blocks))
+        user = (f"TOPIC: {topic}\n\nMERGE these partial write-ups into one clean, "
+                f"well-organized section. Remove repetition, KEEP every [E#] tag "
+                f"citation and every distinct development."
+                f"{_EXPAND_NOTE if expanded else ''}\n\nPARTIALS:\n\n"
+                + "\n\n---\n\n".join(blocks))
     else:
         user = (f"TOPIC: {topic}\n\nPRIOR COVERAGE (last {CONTEXT_DAYS} days, context "
-                f"only):\n{context or '(none available)'}\n\nTODAY'S EMAILS:\n\n"
+                f"only):\n{context or '(none available)'}"
+                f"{_EXPAND_NOTE if expanded else ''}\n\nEMAILS:\n\n"
                 + "\n\n".join(blocks))
     return complete(
-        system=SYNTH_SYSTEM, user=user, max_tokens=2600, thinking_level="low",
+        system=SYNTH_SYSTEM, user=user,
+        max_tokens=4200 if expanded else 2600, thinking_level="low",
         anthropic_model="claude-sonnet-4-6",
         project="daily_brief", script="daily_brief_v2.py", label="synthesize",
     ).strip()
@@ -280,15 +300,17 @@ def _apply_tags(md: str, tagmap: dict[str, str]) -> str:
     return re.sub(r"[ ]{2,}", " ", md)  # tidy any double spaces left by a drop
 
 
-def synthesize_topic(topic: str, emails: list[dict], backlog: bool) -> str:
+def synthesize_topic(topic: str, emails: list[dict], expanded: bool) -> str:
     context = recent_context(topic)
     blocks = [_synth_block(e) for e in emails]
-    if backlog and len(blocks) > SYNTH_SUBBATCH:
-        partials = [_synth_call(topic, blocks[s:s + SYNTH_SUBBATCH], context, False)
+    # Sub-batch (map-reduce) whenever the bucket is large — a natural multi-day
+    # catch-up gets the same completeness treatment as an explicit --backlog run.
+    if len(blocks) > SYNTH_SUBBATCH:
+        partials = [_synth_call(topic, blocks[s:s + SYNTH_SUBBATCH], context, False, expanded)
                     for s in range(0, len(blocks), SYNTH_SUBBATCH)]
-        raw = _synth_call(topic, partials, context, is_reduce=True)
+        raw = _synth_call(topic, partials, context, is_reduce=True, expanded=expanded)
     else:
-        raw = _synth_call(topic, blocks, context, is_reduce=False)
+        raw = _synth_call(topic, blocks, context, is_reduce=False, expanded=expanded)
 
     # In-bucket completeness: any relevant email whose tag never got cited is
     # appended under "### Also noted" so a small item can't vanish silently.
@@ -365,17 +387,18 @@ def extract_events(emails: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def assemble_brief(sections: dict[str, str], events: list[dict],
-                   non_relevant: list[dict], n_relevant: int, n_total: int) -> str:
+                   non_relevant: list[dict], n_relevant: int, n_total: int,
+                   window_label: str) -> str:
     now = datetime.now()
     out = [
         f"# Daily Intelligence Brief — {now.strftime('%B %d, %Y')}", "",
         f"*Generated {now.strftime('%H:%M')} | {n_relevant} relevant of {n_total} "
-        f"emails · trend synthesis*", "",
+        f"emails{window_label} · trend synthesis*", "",
     ]
     for topic in TOPICS_ORDERED:
         body = sections.get(topic)
         out += [f"## {topic}", "", "- [ ] Reviewed", "",
-                body if body else "_No significant developments today._", ""]
+                body if body else "_No significant developments._", ""]
 
     out += ["## Upcoming Events (DC Metro & Virtual)", "", "- [ ] Reviewed", ""]
     if events:
@@ -386,13 +409,14 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
                        f"{ev.get('where','?')}{topic}{link}")
         out.append("")
     else:
-        out += ["_No upcoming events surfaced today._", ""]
+        out += ["_No upcoming events surfaced._", ""]
 
-    # Coverage audit — what got filtered out (marked read and gone), so the
-    # router itself is checkable. Collapsed under a <details> block.
+    # Coverage audit — email the router judged OFF-domain. These are LEFT UNREAD
+    # in the inbox (the reader's own to-do list), so this is just a check on the
+    # filter, not a list of things that were cleared.
     out += ["## Coverage", "",
-            f"<details><summary>{len(non_relevant)} email(s) filtered as "
-            f"non-relevant (marked read, not surfaced)</summary>", ""]
+            f"<details><summary>{len(non_relevant)} email(s) filtered as off-domain "
+            f"(left unread in your inbox, not surfaced)</summary>", ""]
     for e in non_relevant:
         out.append(f"- [{e['subject']}]({e['link']}) — {_sender_name(e['sender'])}")
     out += ["", "</details>", ""]
@@ -427,7 +451,19 @@ def main(argv=None) -> None:
     route_emails(emails)
     relevant = [e for e in emails if e.get("relevant")]
     non_relevant = [e for e in emails if not e.get("relevant")]
-    print(f"  {len(relevant)} relevant of {len(emails)}.")
+    print(f"  {len(relevant)} relevant of {len(emails)} (nexus-filtered).")
+
+    # Window span of the RELEVANT mail — a wide span means a missed-day catch-up
+    # (or the backlog), which triggers expanded, more-thorough synthesis so a
+    # longer window doesn't compress important detail away.
+    window_days = 0
+    window_label = ""
+    dates = [e["date"].date() for e in relevant if e.get("date")]
+    if dates:
+        window_days = (max(dates) - min(dates)).days
+        if window_days >= 1:
+            window_label = (f" spanning {min(dates).strftime('%b %-d')}–"
+                            f"{max(dates).strftime('%b %-d')}")
 
     by_topic: dict[str, list[dict]] = {}
     for e in relevant:
@@ -438,14 +474,17 @@ def main(argv=None) -> None:
     for topic in TOPICS_ORDERED:
         bucket = by_topic.get(topic)
         if bucket:
-            print(f"  {topic}: {len(bucket)} email(s)")
-            sections[topic] = synthesize_topic(topic, bucket, args.backlog)
+            expanded = (args.backlog or len(bucket) >= EXPAND_EMAIL_THRESHOLD
+                        or window_days >= 2)
+            print(f"  {topic}: {len(bucket)} email(s){' [expanded]' if expanded else ''}")
+            sections[topic] = synthesize_topic(topic, bucket, expanded)
 
     print("Extracting events…")
     events = extract_events(emails)
     print(f"  {len(events)} event(s).")
 
-    brief = assemble_brief(sections, events, non_relevant, len(relevant), len(emails))
+    brief = assemble_brief(sections, events, non_relevant,
+                           len(relevant), len(emails), window_label)
 
     if args.dry_run:
         preview = db.OUTPUT_DIR / f"brief_preview_{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -459,13 +498,16 @@ def main(argv=None) -> None:
     print(f"Brief saved → {outfile.name}")
     if db.VAULT_TODAY_PATH:
         db.insert_into_today(brief, Path(db.VAULT_TODAY_PATH))
+    # Mark read ONLY the emails that were briefed (relevant/synthesized). Off-domain
+    # mail is LEFT UNREAD on purpose — the reader parks credit-card/student-loan/
+    # philosophy mail in the inbox as a to-do list, and the brief must not touch it.
     if args.mark_read or not args.backlog:
         try:
-            db.mark_gmail_read(service, [e["id"] for e in emails])
+            db.mark_gmail_read(service, [e["id"] for e in relevant])
         except Exception as exc:
             print(f"  ⚠ Could not mark read: {exc}")
     else:
-        print("  (backlog run: re-run with --mark-read to clear unread)")
+        print(f"  (backlog run: re-run with --mark-read to clear the {len(relevant)} briefed emails)")
     print("\nAll done.")
 
 

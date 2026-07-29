@@ -19,7 +19,7 @@ AI_CODE_DIR="$(dirname "$SCRIPT_DIR")"
 echo "[INFO] $(date '+%F %T') Waiting 20s for DNS to stabilise after network reconnect..."
 sleep 20
 for i in $(seq 1 60); do
-    if host api.anthropic.com >/dev/null 2>&1 && host gmail.googleapis.com >/dev/null 2>&1; then
+    if host generativelanguage.googleapis.com >/dev/null 2>&1 && host gmail.googleapis.com >/dev/null 2>&1; then
         echo "[INFO] DNS ready after $((20 + i * 5))s."
         break
     fi
@@ -34,4 +34,9 @@ done
   >> "$HOME/Library/Logs/email-scan.log" 2>&1
 
 cd "$SCRIPT_DIR"
-/usr/bin/python3 daily_brief.py >> output/cron.log 2>&1
+# daily_brief_v2.py — trend-synthesis brief (replaced the per-email daily_brief.py
+# on 2026-07-28). v2 fetches all unread, routes by geopolitical/intel/tech nexus,
+# synthesizes one trend narrative per topic, marks ONLY the briefed emails read
+# (off-domain mail stays unread — Sean's to-do list), and auto-expands detail on
+# multi-day catch-ups. The old daily_brief.py is kept in the repo for reference.
+/usr/bin/python3 daily_brief_v2.py >> output/cron.log 2>&1
