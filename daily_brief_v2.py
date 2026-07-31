@@ -332,7 +332,10 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool) -> str:
 
 EVENTS_SYSTEM = """You extract UPCOMING events from email for a DC-based policy professional.
 
-From each email labeled with a TAG, pull any specific upcoming event (talk, panel, conference, briefing, webinar) on AI/emerging tech, national security/defense, China/Indo-Pacific, economics/geopolitics, or Russia/Ukraine — that is EITHER in the Washington DC metro area (DC, Arlington, Alexandria, Bethesda, etc.) OR virtual/online. Skip past events, purely commercial webinars with no substance, and events clearly elsewhere with no virtual option.
+Pull an event ONLY if it meets ALL of these:
+1. SUBJECT nexus — it is substantively about AI/emerging tech, national security/defense, China/Indo-Pacific, economics/geopolitics, or Russia/Ukraine. EXCLUDE philosophy/ideas salons, liberalism/political-theory discussions, book/literary/arts festivals, receptions, and general-interest talks — even from serious outlets. If the topic isn't itself geopolitical/intel/tech, skip it.
+2. LOCATION — it is in the Washington DC metro area (DC, Arlington, Alexandria, Bethesda, etc.) OR virtual/online. Skip in-person events elsewhere with no virtual option.
+3. FUTURE — it takes place ON OR AFTER today's date (given in the user message). Skip any event whose date has already passed.
 
 Return ONLY a JSON array (possibly empty), one object per qualifying event:
 {"tag": "<E# of the source email>", "title": "<event title>", "when": "<date/time as stated>", "where": "<DC-area venue or 'Virtual'>", "topic": "<one of the five areas>"}."""
@@ -365,8 +368,11 @@ def extract_events(emails: list[dict]) -> list[dict]:
         batch = candidates[start:start + ROUTE_BATCH]
         blocks = [f"[{e['tag']}] From: {e['sender']}\nSubject: {e['subject']}\n"
                   f"---\n{e['body'][:2000]}\n" for e in batch]
+        today = datetime.now().strftime("%A, %B %d, %Y")
         raw = complete(
-            system=EVENTS_SYSTEM, user="Extract events:\n\n" + "\n\n".join(blocks),
+            system=EVENTS_SYSTEM,
+            user=f"Today is {today}. Only include events on or after today.\n\n"
+                 "Extract events:\n\n" + "\n\n".join(blocks),
             max_tokens=1500, thinking_level="minimal",
             anthropic_model="claude-haiku-4-5-20251001", response_schema=EVENTS_SCHEMA,
             project="daily_brief", script="daily_brief_v2.py", label="events",
