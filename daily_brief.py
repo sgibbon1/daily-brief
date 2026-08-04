@@ -169,8 +169,20 @@ TRUSTED_SENDERS: dict[str, str] = {
     "breakingdefense.com":          "National Security & Defense Technology",
     "defenseone.com":               "National Security & Defense Technology",  # Defense One
     # --- Policy newsletters (broad coverage) ---
-    "politico.com":                 "National Security & Defense Technology",  # All POLITICO newsletters
+    "nationalsecuritydaily@email.politico.com":
+                                    "National Security & Defense Technology",  # POLITICO NatSec Daily (near-always relevant)
+    "digitalfuturedaily@email.politico.com":
+                                    "Artificial Intelligence & Emerging Technology",  # POLITICO Digital Future Daily
+    "politico.com":                 "National Security & Defense Technology",  # All other POLITICO newsletters
+    # --- General business/financial press ---
+    # NOTE: do NOT use a bare "ft.com" substring — it also matches "microsoft.com".
+    "myft@news-alerts.ft.com":      "Economic Competition & Geopolitics",      # myFT Daily Digest
+    "ft@newsletters.ft.com":        "Economic Competition & Geopolitics",      # FT topic newsletters (The AI Shift, etc.)
+    "@ft.com":                      "Economic Competition & Geopolitics",      # other direct FT senders
     # --- Russia / Ukraine ---
+    "pubs@jamestown.org":           "Russia, Ukraine & Eastern Europe",        # Jamestown (Eurasia Daily Monitor / China Brief)
+    "jamestown.org":                "Russia, Ukraine & Eastern Europe",
+    "ukrainehouse.us":              "Russia, Ukraine & Eastern Europe",        # Ukraine House DC (events + Ukraine programming)
     "support@kyivpost.com":         "Russia, Ukraine & Eastern Europe",        # Kyiv Post
     "kyivpost.com":                 "Russia, Ukraine & Eastern Europe",
     "ringtone@thebell.io":          "Russia, Ukraine & Eastern Europe",        # The Bell (EN + RU)

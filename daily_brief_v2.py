@@ -55,8 +55,14 @@ _VALID_TOPICS = set(TOPICS_ORDERED)
 
 CONTEXT_DAYS = 5
 CONTEXT_CHARS = 2500
-SYNTH_BODY_CHARS = 1800
-SYNTH_BODY_CHARS_TRUSTED = 6000
+# Trusted newsletters (WOTR, Economist, Lawfare, ChinaTalk…) are long-form: the
+# substance sits well past the masthead/intro, so they get a much deeper read at
+# BOTH stages. Routing on a shallow slice was judging a long issue on its opening
+# boilerplate. Matches the old per-email script's 20k trusted depth.
+ROUTE_BODY_CHARS = 1200
+ROUTE_BODY_CHARS_TRUSTED = 5000
+SYNTH_BODY_CHARS = 4000
+SYNTH_BODY_CHARS_TRUSTED = 20000
 ROUTE_BATCH = 12
 SYNTH_SUBBATCH = 12
 
@@ -95,6 +101,12 @@ def fetch_all_unread(service, limit: int) -> list[dict]:
     return emails
 
 
+def _is_trusted(e: dict) -> bool:
+    """Is this from a curated intel/policy/tech newsletter (TRUSTED_SENDERS)?
+    Trusted mail is read far more deeply at both routing and synthesis."""
+    return any(p in e.get("sender", "").lower() for p in db.TRUSTED_SENDERS)
+
+
 def _sender_name(sender: str) -> str:
     from email.utils import parseaddr
     name, addr = parseaddr(sender)
@@ -121,7 +133,7 @@ For each email decide:
 
 Set relevant=FALSE — do not force into "Other" — for anything WITHOUT that nexus, even if substantive and worth the reader's time: philosophy/ideas essays, personal finance (credit cards, student loans), religious/devotional readings, purely domestic partisan politics with no national-security angle, personal or lifestyle newsletters, marketing, logistics, fundraising. The reader keeps these unread in their own inbox as a to-do list; the brief must leave them alone.
 
-Emails tagged [TRUSTED SOURCE] are curated intel/policy/tech publications — lean relevant, but still require the nexus.
+Emails tagged [TRUSTED SOURCE] are curated intel/policy/tech publications and are usually LONG-FORM DIGESTS covering several stories in one issue. Read the WHOLE excerpt before judging — the on-domain substance is often further down, past the masthead, subject line, and opening item. If ANY meaningful part of the issue has the nexus, mark it relevant and pick the topic that best fits that part. Only mark a trusted source non-relevant when the entire issue is off-domain or non-editorial (a subscription/marketing promo, a hiring notice, an event-only blast).
 
 Return ONLY a JSON array, one object per email in order:
 {"email_index": <int>, "relevant": <bool>, "topic": "<area or 'Other'>", "is_event": <bool>}."""
@@ -146,11 +158,12 @@ def route_emails(emails: list[dict]) -> None:
         batch = emails[start:start + ROUTE_BATCH]
         blocks = []
         for i, e in enumerate(batch):
-            trusted = any(p in e.get("sender", "").lower() for p in db.TRUSTED_SENDERS)
+            trusted = _is_trusted(e)
             tag = " [TRUSTED SOURCE]" if trusted else ""
+            depth = ROUTE_BODY_CHARS_TRUSTED if trusted else ROUTE_BODY_CHARS
             blocks.append(
                 f"EMAIL {i}{tag}\nFrom: {e['sender']}\nSubject: {e['subject']}\n"
-                f"---\n{e['body'][:1200]}\n"
+                f"---\n{e['body'][:depth]}\n"
             )
         raw = complete(
             system=ROUTE_SYSTEM,
@@ -230,8 +243,7 @@ Rules:
 
 
 def _synth_block(e: dict) -> str:
-    trusted = any(p in e.get("sender", "").lower() for p in db.TRUSTED_SENDERS)
-    limit = SYNTH_BODY_CHARS_TRUSTED if trusted else SYNTH_BODY_CHARS
+    limit = SYNTH_BODY_CHARS_TRUSTED if _is_trusted(e) else SYNTH_BODY_CHARS
     try:
         date_str = e["date"].strftime("%b %d")
     except Exception:
@@ -252,18 +264,41 @@ _EXPAND_NOTE = (
     "development for brevity. Still trend-focused, just fuller.")
 
 
+# Per-topic standing instructions. Ukraine (politics, military capability, and
+# especially defense technology) is a top standing interest, so it gets a
+# permanent subsection in NatSec and explicit call-outs in the Russia section.
+TOPIC_GUIDANCE = {
+    "National Security & Defense Technology": (
+        "\n\nSTANDING REQUIREMENT — this section must ALWAYS include a "
+        "`### Ukraine Defense Tech` subsection covering Ukrainian defense technology, "
+        "military capabilities, procurement, drone/EW/missile innovation, and "
+        "defense-industrial developments — including lessons Western militaries are "
+        "drawing from Ukraine. Scan EVERY email for Ukraine-related defense content, "
+        "including sources from Ukraine and any passing but substantive Ukraine "
+        "mention in a broader piece. If today's material genuinely has none, still "
+        "emit the subsection with one line saying so."),
+    "Russia, Ukraine & Eastern Europe": (
+        "\n\nSTANDING EMPHASIS — Ukraine is a top interest. Lead with Ukraine when "
+        "there is Ukrainian material, and make Ukraine-related developments "
+        "(politics, military capabilities, defense technology, war conduct) explicit "
+        "in your `### Subtopic` headings rather than folding them into general "
+        "Russia coverage."),
+}
+
+
 def _synth_call(topic: str, blocks: list[str], context: str,
                 is_reduce: bool, expanded: bool) -> str:
+    guidance = TOPIC_GUIDANCE.get(topic, "")
     if is_reduce:
         user = (f"TOPIC: {topic}\n\nMERGE these partial write-ups into one clean, "
                 f"well-organized section. Remove repetition, KEEP every [E#] tag "
                 f"citation and every distinct development."
-                f"{_EXPAND_NOTE if expanded else ''}\n\nPARTIALS:\n\n"
+                f"{guidance}{_EXPAND_NOTE if expanded else ''}\n\nPARTIALS:\n\n"
                 + "\n\n---\n\n".join(blocks))
     else:
         user = (f"TOPIC: {topic}\n\nPRIOR COVERAGE (last {CONTEXT_DAYS} days, context "
                 f"only):\n{context or '(none available)'}"
-                f"{_EXPAND_NOTE if expanded else ''}\n\nEMAILS:\n\n"
+                f"{guidance}{_EXPAND_NOTE if expanded else ''}\n\nEMAILS:\n\n"
                 + "\n\n".join(blocks))
     return complete(
         system=SYNTH_SYSTEM, user=user,
@@ -332,6 +367,8 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool) -> str:
 
 EVENTS_SYSTEM = """You extract UPCOMING events from email for a DC-based policy professional.
 
+SPECIAL SOURCE — POLITICO's National Security Daily ends nearly every issue with a "Tomorrow Today" section listing next-day/upcoming Washington events (hearings, think-tank panels, briefings). ALWAYS mine that section and extract every listed event that passes the filters below; these are prime DC-area natsec events.
+
 Pull an event ONLY if it meets ALL of these:
 1. SUBJECT nexus — it is substantively about AI/emerging tech, national security/defense, China/Indo-Pacific, economics/geopolitics, or Russia/Ukraine. EXCLUDE philosophy/ideas salons, liberalism/political-theory discussions, book/literary/arts festivals, receptions, and general-interest talks — even from serious outlets. If the topic isn't itself geopolitical/intel/tech, skip it.
 2. LOCATION — it is in the Washington DC metro area (DC, Arlington, Alexandria, Bethesda, etc.) OR virtual/online. Skip in-person events elsewhere with no virtual option.
@@ -356,10 +393,36 @@ EVENTS_SCHEMA = {
 }
 
 
+# Event-listing blocks that ride at the END of a long digest. POLITICO NatSec
+# Daily's is "Tomorrow Today"; the others are common variants worth catching.
+_EVENT_BLOCK_RE = re.compile(
+    r"(tomorrow\s+today|on\s+the\s+calendar|upcoming\s+events|mark\s+your\s+calendar)",
+    re.IGNORECASE)
+
+
+def _event_excerpt(e: dict) -> str:
+    """Excerpt to send the event extractor.
+
+    A dedicated invite states itself up top, so the head is enough. But a digest's
+    event listing sits at the very END (past a 2k head slice), so when we spot an
+    event-block marker we send the text from that marker onward — otherwise
+    "Tomorrow Today" would never reach the model.
+    """
+    body = e.get("body", "")
+    m = _EVENT_BLOCK_RE.search(body)
+    if m:
+        return body[:800] + "\n…\n" + body[max(0, m.start() - 200):m.start() + 4000]
+    return body[:2000]
+
+
 def extract_events(emails: list[dict]) -> list[dict]:
     """Scan ALL fetched email (event invites are often routed non-relevant) for
     DC-area / virtual upcoming events. Returns event dicts with a real link."""
-    candidates = [e for e in emails if e.get("is_event")]
+    # Routing flags dedicated event invites, but event LISTINGS also ride inside
+    # digests it marks non-event — notably POLITICO NatSec Daily's "Tomorrow
+    # Today" block. Include any email carrying that marker regardless of is_event.
+    candidates = [e for e in emails
+                  if e.get("is_event") or _EVENT_BLOCK_RE.search(e.get("body", ""))]
     if not candidates:
         return []
     tagmap = {e["tag"]: e["link"] for e in candidates}
@@ -367,7 +430,7 @@ def extract_events(emails: list[dict]) -> list[dict]:
     for start in range(0, len(candidates), ROUTE_BATCH):
         batch = candidates[start:start + ROUTE_BATCH]
         blocks = [f"[{e['tag']}] From: {e['sender']}\nSubject: {e['subject']}\n"
-                  f"---\n{e['body'][:2000]}\n" for e in batch]
+                  f"---\n{_event_excerpt(e)}\n" for e in batch]
         today = datetime.now().strftime("%A, %B %d, %Y")
         raw = complete(
             system=EVENTS_SYSTEM,
@@ -392,6 +455,23 @@ def extract_events(emails: list[dict]) -> list[dict]:
 # Assemble
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _checkbox_body(body: str) -> tuple[str, bool]:
+    """Put a `- [ ] Reviewed` box under each `###` subsection heading.
+
+    Returns (body, had_subsections). When a section HAS subsections the boxes go
+    on them (finer-grained tracking); the caller then omits the section-level box.
+    """
+    lines = body.splitlines()
+    out: list[str] = []
+    found = False
+    for line in lines:
+        out.append(line)
+        if re.match(r"^###\s+\S", line):
+            found = True
+            out += ["", "- [ ] Reviewed"]
+    return "\n".join(out), found
+
+
 def assemble_brief(sections: dict[str, str], events: list[dict],
                    non_relevant: list[dict], n_relevant: int, n_total: int,
                    window_label: str) -> str:
@@ -403,8 +483,17 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
     ]
     for topic in TOPICS_ORDERED:
         body = sections.get(topic)
-        out += [f"## {topic}", "", "- [ ] Reviewed", "",
-                body if body else "_No significant developments._", ""]
+        if not body:
+            out += [f"## {topic}", "", "- [ ] Reviewed", "",
+                    "_No significant developments._", ""]
+            continue
+        # Checkboxes live on the SUBSECTIONS when a section has any; only a
+        # section with no `###` subsections carries its own checkbox.
+        boxed, has_subs = _checkbox_body(body)
+        out += [f"## {topic}", ""]
+        if not has_subs:
+            out += ["- [ ] Reviewed", ""]
+        out += [boxed, ""]
 
     out += ["## Upcoming Events (DC Metro & Virtual)", "", "- [ ] Reviewed", ""]
     if events:
