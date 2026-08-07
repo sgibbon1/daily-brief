@@ -39,4 +39,17 @@ cd "$SCRIPT_DIR"
 # synthesizes one trend narrative per topic, marks ONLY the briefed emails read
 # (off-domain mail stays unread — Sean's to-do list), and auto-expands detail on
 # multi-day catch-ups. The old daily_brief.py is kept in the repo for reference.
-/usr/bin/python3 daily_brief_v2.py >> output/cron.log 2>&1
+#
+# Log target is LOCAL disk, not output/cron.log on the Drive mount. On 2026-08-04
+# every one of the 3 resilient_run retries did all its real work (brief written,
+# inserted into Today.md, relevant email marked read) but still exited 120 — the
+# exact code CPython returns when Py_FinalizeEx() fails to flush stdout/stderr at
+# shutdown. The flush target was output/cron.log, on the same Drive mount that
+# throws EDEADLK on placeholder files elsewhere in this pipeline (see
+# resilient_run.sh's header comment). resilient_run.sh then retried the "failed"
+# run two more times, each re-fetching only what was STILL unread and overwriting
+# the previous attempt's (larger, correct) brief_2026-08-04.md with a smaller one
+# — the earlier attempts' already-marked-read email was gone for good. Logging to
+# local disk removes the flush failure at the source, so a successful run reports
+# rc=0 and never gets cannibalized by a retry.
+/usr/bin/python3 daily_brief_v2.py >> "$HOME/Library/Logs/daily-brief-detail.log" 2>&1

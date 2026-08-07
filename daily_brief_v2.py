@@ -370,7 +370,7 @@ EVENTS_SYSTEM = """You extract UPCOMING events from email for a DC-based policy 
 SPECIAL SOURCE — POLITICO's National Security Daily ends nearly every issue with a "Tomorrow Today" section listing next-day/upcoming Washington events (hearings, think-tank panels, briefings). ALWAYS mine that section and extract every listed event that passes the filters below; these are prime DC-area natsec events.
 
 Pull an event ONLY if it meets ALL of these:
-1. SUBJECT nexus — it is substantively about AI/emerging tech, national security/defense, China/Indo-Pacific, economics/geopolitics, or Russia/Ukraine. EXCLUDE philosophy/ideas salons, liberalism/political-theory discussions, book/literary/arts festivals, receptions, and general-interest talks — even from serious outlets. If the topic isn't itself geopolitical/intel/tech, skip it.
+1. SUBJECT nexus — it is substantively about AI/emerging tech, national security/defense, China/Indo-Pacific, economics/geopolitics, or Russia/Ukraine. EXCLUDE philosophy/ideas salons, liberalism/political-theory discussions, book/literary/arts festivals, receptions, general-interest talks, and gym/fitness class schedules (CrossFit, weightlifting, HYROX, etc.) — even from serious outlets or emails that also mention "national security" in a business name. If the topic isn't itself geopolitical/intel/tech, skip it, and never assign one of the five topic labels to an event that fails this filter.
 2. LOCATION — it is in the Washington DC metro area (DC, Arlington, Alexandria, Bethesda, etc.) OR virtual/online. Skip in-person events elsewhere with no virtual option.
 3. FUTURE — it takes place ON OR AFTER today's date (given in the user message). Skip any event whose date has already passed.
 
