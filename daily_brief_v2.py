@@ -131,7 +131,16 @@ def fetch_all_unread(service, limit: int, extra_query: str = "",
             "sender": headers.get("From", "Unknown"),
             "date": date,
             "body": db._extract_gmail_body(msg["payload"])[:db.MAX_BODY_CHARS_FETCH],
-            "link": f"https://mail.google.com/mail/u/0/#inbox/{ref['id']}",
+            # `#all/<id>` not `#inbox/<id>`: this pipeline marks briefed mail READ,
+            # and if a message has since left the Inbox label (archived by hand, or
+            # by a filter) an `#inbox/<id>` link can't find it there and Gmail's web
+            # client silently falls back to showing the plain inbox list instead of
+            # the message — exactly the "link just opens my inbox" symptom Sean saw
+            # on mobile. `#all/<id>` matches the message by ID against ALL MAIL,
+            # which always contains it regardless of current label, and resolves
+            # the same way in desktop and mobile Gmail (web or the native app via
+            # Universal Links) since both read the same id out of the URL.
+            "link": f"https://mail.google.com/mail/u/0/#all/{ref['id']}",
         }
 
     # Sequential fetch of a few thousand messages takes ~40 min; threaded, ~1.
@@ -473,7 +482,7 @@ Rules:
 - Lead with the day's throughline; where a recurring pattern warrants it, use `### Subtopic` headings.
 - AGGREGATE across sources. When multiple independent outlets converge, say so (real trend). When a claim rests on a SINGLE source, attribute it and don't inflate it. Don't overreact to one datapoint.
 - Use the prior-days context to note whether a theme is BUILDING, CONTINUING, or FADING — only when the context supports it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days context in link syntax — only today's tagged emails can be linked.
-- CITATIONS — follow this format exactly: cite a development as a markdown link whose bracket text describes it and whose target is the email's TAG. Example: `Nvidia launched a cyberdefense alliance [Open Secure AI Alliance](E17).` Real descriptive words in the brackets, the bare tag (E17) in the parens. NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way. Don't invent tags.
+- CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way. Don't invent tags.
 - Be terse. No filler, no restating. If the material is thin, a few sentences is fine.
 - Output GitHub-flavored markdown ONLY. Do NOT emit the topic name as a heading (it's added for you). Start with prose or a `### Subtopic`."""
 
@@ -544,25 +553,29 @@ def _synth_call(topic: str, blocks: list[str], context: str,
     ).strip()
 
 
-def _apply_tags(md: str, tagmap: dict[str, str]) -> str:
+def _apply_tags(md: str, tagmap: dict[str, str], namemap: dict[str, str]) -> str:
     """Turn every email-tag citation into a real clickable URL, whatever form the
-    model emitted — proper `[desc](E#)`, bare `(E#)`, or bare `[E#]`. Unknown tags
-    are dropped entirely. Guarantees no fabricated/cross-wired URL and no raw tag
-    marker leaking into the brief."""
-    # 1) proper [desc](E#) → [desc](url); unknown → keep descriptor as plain text
+    model emitted — proper `[desc](E#)`, bare `(E#)`, or bare `[E#]`. The link TEXT
+    is always overwritten with the source's publication/sender name from `namemap`
+    (never the model's own bracket text or the email subject) — deterministic, so
+    it can't drift into a subject-line paraphrase. Unknown tags are dropped
+    entirely. Guarantees no fabricated/cross-wired URL and no raw tag marker
+    leaking into the brief."""
+    # 1) [anything](E#) → [publication name](url); unknown tag → fall back to the
+    #    model's own bracket text as plain words (better than a hole in the prose)
     md = re.sub(
         r"\[([^\]]+)\]\((E\d+)\)",
-        lambda m: f"[{m.group(1)}]({tagmap[m.group(2)]})" if m.group(2) in tagmap else m.group(1),
+        lambda m: f"[{namemap[m.group(2)]}]({tagmap[m.group(2)]})" if m.group(2) in tagmap else m.group(1),
         md)
-    # 2) bare (E#) → a compact ([↗](url)); unknown → drop
+    # 2) bare (E#) → ([publication name](url)); unknown → drop
     md = re.sub(
         r"\((E\d+)\)",
-        lambda m: f"([↗]({tagmap[m.group(1)]}))" if m.group(1) in tagmap else "",
+        lambda m: f"([{namemap[m.group(1)]}]({tagmap[m.group(1)]}))" if m.group(1) in tagmap else "",
         md)
-    # 3) bare [E#] → [↗](url); unknown → drop
+    # 3) bare [E#] → [publication name](url); unknown → drop
     md = re.sub(
         r"\[(E\d+)\]",
-        lambda m: f"[↗]({tagmap[m.group(1)]})" if m.group(1) in tagmap else "",
+        lambda m: f"[{namemap[m.group(1)]}]({tagmap[m.group(1)]})" if m.group(1) in tagmap else "",
         md)
     # 4) unwrap any leftover [text](target) whose target isn't a real URL — the
     #    model sometimes "links" cross-day context to a date or source name
@@ -572,7 +585,8 @@ def _apply_tags(md: str, tagmap: dict[str, str]) -> str:
 
 
 def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
-                     tagmap: dict[str, str] | None = None) -> str:
+                     tagmap: dict[str, str] | None = None,
+                     namemap: dict[str, str] | None = None) -> str:
     context = recent_context(topic)
     blocks = [_synth_block(e) for e in emails]
     # Sub-batch (map-reduce) whenever the bucket is large — a natural multi-day
@@ -594,12 +608,13 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     # nothing and _apply_tags strips the link, stranding the descriptor mid-
     # sentence ("…does not advance the frontier Sonnet 5 release.").
     tagmap = tagmap or {e["tag"]: e["link"] for e in emails}
+    namemap = namemap or {e["tag"]: _sender_name(e["sender"]) for e in emails}
     missing = [e for e in emails if e["tag"] not in cited]
-    body = _apply_tags(raw, tagmap)
+    body = _apply_tags(raw, tagmap, namemap)
     if missing:
         body += "\n\n### Also noted\n"
         for e in missing:
-            body += f"- [{e['subject']}]({e['link']}) — {_sender_name(e['sender'])}\n"
+            body += f"- [{_sender_name(e['sender'])}]({e['link']}) — {e['subject']}\n"
     return body.strip()
 
 
@@ -784,7 +799,7 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
             f"<details><summary>{len(non_relevant)} email(s) filtered as off-domain "
             f"(left unread in your inbox, not surfaced)</summary>", ""]
     for e in non_relevant:
-        out.append(f"- [{e['subject']}]({e['link']}) — {_sender_name(e['sender'])}")
+        out.append(f"- [{_sender_name(e['sender'])}]({e['link']}) — {e['subject']}")
     out += ["", "</details>", ""]
 
     # Personal/professional mail is listed by SUBJECT ONLY, never summarized, and
@@ -793,7 +808,7 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
         out += [f"<details><summary>{len(personal)} personal/professional email(s) "
                 f"— left untouched for you to handle</summary>", ""]
         for e in personal:
-            out.append(f"- [{e['subject']}]({e['link']}) — {_sender_name(e['sender'])}")
+            out.append(f"- [{_sender_name(e['sender'])}]({e['link']}) — {e['subject']}")
         out += ["", "</details>", ""]
     return "\n".join(out)
 
@@ -866,6 +881,7 @@ def main(argv=None) -> None:
 
     print("Stage 2 — synthesizing per topic…")
     global_tagmap = {e["tag"]: e["link"] for e in emails}
+    global_namemap = {e["tag"]: _sender_name(e["sender"]) for e in emails}
     sections: dict[str, str] = {}
     for topic in TOPICS_ORDERED:
         bucket = by_topic.get(topic)
@@ -873,7 +889,8 @@ def main(argv=None) -> None:
             expanded = (args.backlog or len(bucket) >= EXPAND_EMAIL_THRESHOLD
                         or window_days >= 2)
             print(f"  {topic}: {len(bucket)} email(s){' [expanded]' if expanded else ''}")
-            sections[topic] = synthesize_topic(topic, bucket, expanded, global_tagmap)
+            sections[topic] = synthesize_topic(topic, bucket, expanded,
+                                               global_tagmap, global_namemap)
 
     print("Extracting events…")
     events = extract_events(emails)

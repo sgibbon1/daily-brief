@@ -321,7 +321,9 @@ def fetch_gmail_emails(service, since: datetime, until: datetime) -> list[dict]:
             "sender": headers.get("From", "Unknown"),
             "date": date,
             "body": _extract_gmail_body(msg["payload"])[:MAX_BODY_CHARS_FETCH],
-            "link": f"https://mail.google.com/mail/u/0/#inbox/{ref['id']}",
+            # #all/<id>, not #inbox/<id> — see daily_brief_v2.py's fetch_all_unread
+            # for why (a message that's left the Inbox label breaks #inbox links).
+            "link": f"https://mail.google.com/mail/u/0/#all/{ref['id']}",
             "_service": service,
         })
     return emails
