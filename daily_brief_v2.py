@@ -117,26 +117,35 @@ def daily_window_query() -> tuple[str, str]:
 def _gmail_link(gmail_id: str, rfc822_message_id: str | None) -> str:
     """Best-effort deep link to one message.
 
-    `#all/<gmail-id>` (searching by Gmail's own internal id, scoped to All Mail
-    rather than Inbox so an archived message still resolves) is what desktop
-    Gmail reliably opens. But on iOS — whether the link opens in the native
-    Gmail app via Universal Links, or cold-loads in mobile Safari's Gmail web
-    client — that direct id/label navigation is a known, apparently-unfixed
-    dead end: a dedicated 2020s forum thread on exactly this ("deep-link a
-    Gmail message from another iOS app") never turned up a working id-based
-    format (https://discourse.omnigroup.com/t/open-gmail-links-in-an-app-on-ios/53332).
-    `#search/rfc822msgid:<Message-ID>` asks Gmail to SEARCH instead of
-    directly navigating to a label/id pair — search is a more fundamental,
-    consistently-implemented code path than direct navigation, and critically
-    it is NOT label-scoped, so it resolves an archived message the same as an
-    inbox one. It isn't a guaranteed fix (no format we found is, per that
-    thread) but it's the more robust of the two, so it's preferred whenever
-    the email actually carried a Message-ID header — nearly all do.
+    Every `https://mail.google.com/...#...` format we tried (`#inbox/<id>`,
+    `#all/<id>`, `#search/rfc822msgid:...`) landed on the plain inbox on Sean's
+    phone instead of the message. Fetching Gmail's real
+    apple-app-site-association (2026-08) showed why chasing a better fragment
+    was a dead end: Gmail's iOS app isn't registered for Universal Links on
+    mail.google.com at all (only Maps/Calendar/Photos/etc. are — Gmail shows up
+    solely under `webcredentials`, for password autofill). So iOS isn't handing
+    the URL to the app and dropping the fragment; the likelier culprit is
+    Gmail's own mobile web JS redirecting into the app once the page loads —
+    which no URL shape can prevent, since it fires after the page is already
+    rendered.
+
+    `message://%3C<Message-ID>%3E` sidesteps mail.google.com entirely. It's
+    Apple Mail's own scheme (works on iOS Mail and macOS Mail.app — confirmed
+    Sean's account is in iOS Mail), so opening it never touches Gmail's web
+    client or app at all. Per Apple's own (undocumented but stable, in
+    production since iOS 7) behavior: on iOS, if the message isn't immediately
+    at hand Mail still opens and loads it async in the background — no failure
+    mode. On macOS, an uncached message throws an error dialog instead
+    (MCMailErrorDomain 1030) rather than silently showing the wrong thing,
+    which is the one place this can regress — but these links are always to
+    mail from the last day or two, so it should almost always already be
+    synced. Falls back to Gmail's `#all/<gmail-id>` (desktop-reliable, at
+    least not silently wrong) for the rare email with no Message-ID header.
     """
     if rfc822_message_id:
         bare = rfc822_message_id.strip().strip("<>")
         if bare:
-            return f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{quote(bare, safe='')}"
+            return f"message://{quote(f'<{bare}>', safe='')}"
     return f"https://mail.google.com/mail/u/0/#all/{gmail_id}"
 
 
