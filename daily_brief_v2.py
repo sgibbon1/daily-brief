@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date as _date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import daily_brief as db
 from llm import complete, get_ai_provider
@@ -113,6 +114,32 @@ def daily_window_query() -> tuple[str, str]:
     return (f"after:{start.strftime('%Y/%m/%d')}",
             f" · window {start.strftime('%b %-d')}→today ({gap}d)")
 
+def _gmail_link(gmail_id: str, rfc822_message_id: str | None) -> str:
+    """Best-effort deep link to one message.
+
+    `#all/<gmail-id>` (searching by Gmail's own internal id, scoped to All Mail
+    rather than Inbox so an archived message still resolves) is what desktop
+    Gmail reliably opens. But on iOS — whether the link opens in the native
+    Gmail app via Universal Links, or cold-loads in mobile Safari's Gmail web
+    client — that direct id/label navigation is a known, apparently-unfixed
+    dead end: a dedicated 2020s forum thread on exactly this ("deep-link a
+    Gmail message from another iOS app") never turned up a working id-based
+    format (https://discourse.omnigroup.com/t/open-gmail-links-in-an-app-on-ios/53332).
+    `#search/rfc822msgid:<Message-ID>` asks Gmail to SEARCH instead of
+    directly navigating to a label/id pair — search is a more fundamental,
+    consistently-implemented code path than direct navigation, and critically
+    it is NOT label-scoped, so it resolves an archived message the same as an
+    inbox one. It isn't a guaranteed fix (no format we found is, per that
+    thread) but it's the more robust of the two, so it's preferred whenever
+    the email actually carried a Message-ID header — nearly all do.
+    """
+    if rfc822_message_id:
+        bare = rfc822_message_id.strip().strip("<>")
+        if bare:
+            return f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{quote(bare, safe='')}"
+    return f"https://mail.google.com/mail/u/0/#all/{gmail_id}"
+
+
 def fetch_all_unread(service, limit: int, extra_query: str = "",
                      include_read: bool = False) -> list[dict]:
     """Mail newest-first, unread-only unless `include_read`.
@@ -172,16 +199,7 @@ def fetch_all_unread(service, limit: int, extra_query: str = "",
             "sender": headers.get("From", "Unknown"),
             "date": date,
             "body": db._extract_gmail_body(msg["payload"])[:db.MAX_BODY_CHARS_FETCH],
-            # `#all/<id>` not `#inbox/<id>`: this pipeline marks briefed mail READ,
-            # and if a message has since left the Inbox label (archived by hand, or
-            # by a filter) an `#inbox/<id>` link can't find it there and Gmail's web
-            # client silently falls back to showing the plain inbox list instead of
-            # the message — exactly the "link just opens my inbox" symptom Sean saw
-            # on mobile. `#all/<id>` matches the message by ID against ALL MAIL,
-            # which always contains it regardless of current label, and resolves
-            # the same way in desktop and mobile Gmail (web or the native app via
-            # Universal Links) since both read the same id out of the URL.
-            "link": f"https://mail.google.com/mail/u/0/#all/{ref['id']}",
+            "link": _gmail_link(ref["id"], headers.get("Message-ID")),
         }
 
     # Sequential fetch of a few thousand messages takes ~40 min; threaded, ~1.
@@ -288,7 +306,7 @@ def route_emails(emails: list[dict]) -> None:
         raw = complete(
             system=ROUTE_SYSTEM,
             user="Triage these emails:\n\n" + "\n\n".join(blocks),
-            max_tokens=1600, thinking_level="minimal",
+            max_tokens=1600, thinking_level="low",
             anthropic_model="claude-haiku-4-5-20251001",
             response_schema=ROUTE_SCHEMA,
             project="daily_brief", script="daily_brief_v2.py", label="route",
@@ -737,7 +755,7 @@ def extract_events(emails: list[dict]) -> list[dict]:
             system=EVENTS_SYSTEM,
             user=f"Today is {today}. Only include events on or after today.\n\n"
                  "Extract events:\n\n" + "\n\n".join(blocks),
-            max_tokens=1500, thinking_level="minimal",
+            max_tokens=1500, thinking_level="low",
             anthropic_model="claude-haiku-4-5-20251001", response_schema=EVENTS_SCHEMA,
             project="daily_brief", script="daily_brief_v2.py", label="events",
         ).strip()

@@ -23,11 +23,17 @@ IMPORTANT: unlike Claude, Gemini's "thinking" tokens are deducted from the SAME
 max_output_tokens budget as the actual answer — a long system prompt (e.g. a
 full resume) can burn most or all of a tight max_tokens on thinking alone,
 truncating the real output mid-JSON with no error, just a short/malformed
-string. Pass thinking_level="minimal" for trivial single-judgment calls (a
-score, a classification) and leave generous max_tokens headroom (200 was not
-enough for one real case — 190 of 200 tokens went to thinking). "low" (the
-default) is fine for genuine synthesis work that benefits from more reasoning
-(validated against real weekly-report generation).
+string. Leave generous max_tokens headroom for trivial single-judgment calls
+(a score, a classification) — 200 was not enough for one real case (190 of
+200 tokens went to thinking).
+
+thinking_level: only "low" and "high" are accepted as of 2026-08 — the
+Interactions API used to also take "minimal"/"medium" but now rejects them
+with a 400 ("not a supported thinking level for this model"), which is what
+broke every caller passing "minimal" (daily_brief_v2.py's routing/events
+calls, natsec_jobs/score_jobs.py's scoring call) until this was caught.
+"low" (the default) is fine for both trivial judgment calls and genuine
+synthesis work (validated against real weekly-report generation).
 """
 from __future__ import annotations
 
@@ -145,10 +151,8 @@ def complete(*, system: str, user: str, max_tokens: int, anthropic_model: str,
     `anthropic_model` is used when AI_PROVIDER=anthropic; `gemini_model`
     (defaulting to GEMINI_MODEL) is used when AI_PROVIDER=gemini.
 
-    `thinking_level` (Gemini only): "minimal", "low" (default), "medium", or
-    "high". Use "minimal" for a trivial single-judgment call (a score, a
-    classification) to guarantee max_tokens headroom for the actual answer —
-    see the module docstring for why this matters on Gemini specifically.
+    `thinking_level` (Gemini only): "low" (default) or "high" — see the module
+    docstring for why generous max_tokens headroom matters on Gemini specifically.
 
     `response_schema` (Gemini only): a JSON schema dict (top-level "type":
     "array"/"object"). When set, Gemini ENFORCES valid JSON matching the
