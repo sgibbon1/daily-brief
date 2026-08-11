@@ -37,7 +37,7 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date as _date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -69,8 +69,49 @@ SYNTH_SUBBATCH = 12
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fetch — all unread (not date-windowed)
+# Fetch
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# The daily window is TIME-based, not count-based. Taking "the newest N unread"
+# silently clips a busy day: arrivals run 46–67/day against the old N=60, so the
+# tail of a heavy day fell off the back. Instead we ask for everything unread
+# since the last brief ran, and --limit is only a runaway-cost backstop.
+#
+# Mail briefed on a previous run is already marked read, so re-querying from the
+# last brief's date costs nothing and self-corrects: anything that arrived late,
+# or that a failed run missed, is picked up on the next run rather than lost.
+
+DEFAULT_WINDOW_CAP_DAYS = 7    # a long outage shouldn't trigger a 10k-email run
+FETCH_SAFETY_CAP = 400
+
+
+def _last_brief_date() -> _date | None:
+    """Date of the most recent generated brief, from the output directory."""
+    dates = []
+    for f in db.OUTPUT_DIR.glob("brief_*.md"):
+        m = re.fullmatch(r"brief_(\d{4})-(\d{2})-(\d{2})", f.stem)
+        if m:
+            try:
+                dates.append(datetime(*map(int, m.groups())).date())
+            except ValueError:
+                pass
+    return max(dates) if dates else None
+
+
+def daily_window_query() -> tuple[str, str]:
+    """(gmail_query_terms, human_label) covering everything since the last brief.
+
+    Gmail's `after:D` means D 00:00 onward, so passing the last brief's own date
+    re-covers that day — deliberately, since mail can arrive after the run.
+    """
+    last = _last_brief_date()
+    today = datetime.now().date()
+    start = today - timedelta(days=2) if last is None else min(last, today)
+    # Never reach further back than the cap, however long the outage.
+    start = max(start, today - timedelta(days=DEFAULT_WINDOW_CAP_DAYS))
+    gap = (today - start).days
+    return (f"after:{start.strftime('%Y/%m/%d')}",
+            f" · window {start.strftime('%b %-d')}→today ({gap}d)")
 
 def fetch_all_unread(service, limit: int, extra_query: str = "",
                      include_read: bool = False) -> list[dict]:
@@ -820,7 +861,9 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="Trend-synthesis Daily Intelligence Brief")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--limit", type=int, default=60)
+    ap.add_argument("--limit", type=int, default=FETCH_SAFETY_CAP,
+                    help=f"safety cap on messages fetched (default {FETCH_SAFETY_CAP}); "
+                         "the daily window is time-based, not count-based")
     ap.add_argument("--backlog", action="store_true")
     ap.add_argument("--mark-read", action="store_true")
     ap.add_argument("--before", metavar="YYYY/MM/DD",
@@ -849,9 +892,18 @@ def main(argv=None) -> None:
         f"before:{args.before}" if args.before else "",
         f"after:{args.after}" if args.after else "",
     ]))
+    # A plain daily run (no explicit window, not a backlog/retrospective) covers
+    # everything unread since the last brief — the whole day's arrivals, however
+    # heavy the day, rather than a fixed count of the newest.
+    fetch_note = ""
+    if not extra and not args.backlog and not args.include_read:
+        extra, fetch_note = daily_window_query()
     emails = fetch_all_unread(service, limit, extra, include_read=args.include_read)
     print(f"Fetched {len(emails)} unread email(s)"
-          f"{f' [{extra}]' if extra else ''}.")
+          f"{f' [{extra}]' if extra else ''}{fetch_note}.")
+    if len(emails) >= limit:
+        print(f"  ⚠ hit the --limit safety cap ({limit}) — some mail in the window "
+              f"was not fetched; raise --limit if this recurs.")
     if not emails:
         print("Nothing to brief."); return
 
