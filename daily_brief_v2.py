@@ -40,7 +40,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date as _date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import quote
 
 import daily_brief as db
 from llm import complete, get_ai_provider
@@ -114,38 +113,30 @@ def daily_window_query() -> tuple[str, str]:
     return (f"after:{start.strftime('%Y/%m/%d')}",
             f" · window {start.strftime('%b %-d')}→today ({gap}d)")
 
-def _gmail_link(gmail_id: str, rfc822_message_id: str | None) -> str:
-    """Best-effort deep link to one message.
+def _gmail_link(gmail_id: str) -> str:
+    """Deep link to one message. Reliable on desktop; a KNOWN, non-fixable-at-
+    the-URL-level limitation on mobile — documented here so nobody re-litigates
+    this from scratch next time it looks broken.
 
-    Every `https://mail.google.com/...#...` format we tried (`#inbox/<id>`,
-    `#all/<id>`, `#search/rfc822msgid:...`) landed on the plain inbox on Sean's
-    phone instead of the message. Fetching Gmail's real
-    apple-app-site-association (2026-08) showed why chasing a better fragment
-    was a dead end: Gmail's iOS app isn't registered for Universal Links on
-    mail.google.com at all (only Maps/Calendar/Photos/etc. are — Gmail shows up
-    solely under `webcredentials`, for password autofill). So iOS isn't handing
-    the URL to the app and dropping the fragment; the likelier culprit is
-    Gmail's own mobile web JS redirecting into the app once the page loads —
-    which no URL shape can prevent, since it fires after the page is already
-    rendered.
+    `#all/<gmail-id>` (searching by Gmail's own internal id, scoped to All Mail
+    rather than Inbox so an archived message still resolves) is what desktop
+    Gmail opens correctly. On Sean's iPhone it doesn't — tapping it lands on
+    the plain inbox instead of the message, on EVERY `mail.google.com/...#...`
+    fragment format tried (`#inbox/<id>`, `#all/<id>`, `#search/rfc822msgid:`),
+    and also on `message://%3C<Message-ID>%3E` (Apple Mail's own scheme,
+    sidestepping Gmail entirely, confirmed set up on his phone).
 
-    `message://%3C<Message-ID>%3E` sidesteps mail.google.com entirely. It's
-    Apple Mail's own scheme (works on iOS Mail and macOS Mail.app — confirmed
-    Sean's account is in iOS Mail), so opening it never touches Gmail's web
-    client or app at all. Per Apple's own (undocumented but stable, in
-    production since iOS 7) behavior: on iOS, if the message isn't immediately
-    at hand Mail still opens and loads it async in the background — no failure
-    mode. On macOS, an uncached message throws an error dialog instead
-    (MCMailErrorDomain 1030) rather than silently showing the wrong thing,
-    which is the one place this can regress — but these links are always to
-    mail from the last day or two, so it should almost always already be
-    synced. Falls back to Gmail's `#all/<gmail-id>` (desktop-reliable, at
-    least not silently wrong) for the rare email with no Message-ID header.
+    Root cause, confirmed by fetching Gmail's real apple-app-site-association
+    (2026-08): Gmail's iOS app isn't registered for Universal Links on
+    mail.google.com — only Maps/Calendar/Photos/etc. are; Gmail appears solely
+    under `webcredentials` (password autofill, unrelated). So this isn't an
+    OS-level handoff dropping the URL fragment — it's Gmail's own mobile web
+    JS redirecting into the app once the page has already loaded, which no
+    URL shape can prevent from outside the page. Confirmed as a real,
+    non-fixable-at-the-URL-level constraint, not an unexplored one — see
+    conversation history in this repo's commit log around 2026-08-11 for the
+    full investigation (AASA fetch, message:// scheme, rfc822msgid search).
     """
-    if rfc822_message_id:
-        bare = rfc822_message_id.strip().strip("<>")
-        if bare:
-            return f"message://{quote(f'<{bare}>', safe='')}"
     return f"https://mail.google.com/mail/u/0/#all/{gmail_id}"
 
 
@@ -208,7 +199,7 @@ def fetch_all_unread(service, limit: int, extra_query: str = "",
             "sender": headers.get("From", "Unknown"),
             "date": date,
             "body": db._extract_gmail_body(msg["payload"])[:db.MAX_BODY_CHARS_FETCH],
-            "link": _gmail_link(ref["id"], headers.get("Message-ID")),
+            "link": _gmail_link(ref["id"]),
         }
 
     # Sequential fetch of a few thousand messages takes ~40 min; threaded, ~1.
