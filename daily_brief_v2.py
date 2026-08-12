@@ -260,6 +260,52 @@ def _sender_name(sender: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Read-before-fetch — surface the blind spot `is:unread` can't see
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Reading mail directly in Gmail (opening it, or even a wide preview pane) marks
+# it read before this script ever runs — `is:unread` then skips it at the fetch
+# stage, so it's never routed, never synthesized, and never appears in Coverage
+# either (Coverage only lists mail the ROUTER saw and rejected). It just vanishes
+# with no trace, and it's the same shape of surprise as mail getting marked read
+# without a summary, so it deserves the same visibility. We don't re-route every
+# already-read email in the window — most of it is ordinary inbox traffic
+# (shopping receipts, personal correspondence) and dumping all of it into the
+# brief would bury the signal. Instead this scans only the curated
+# TRUSTED_SENDERS allowlist — the sources most likely to have mattered — with a
+# cheap sender-string check and no LLM call.
+def find_read_before_fetch(service, extra_query: str) -> list[dict]:
+    q = (f"is:read {extra_query}").strip()
+    try:
+        result = service.users().messages().list(
+            userId="me", q=q, maxResults=200
+        ).execute(num_retries=db.API_RETRIES)
+    except Exception as exc:
+        print(f"  ⚠ read-before-fetch scan failed: {exc}")
+        return []
+
+    hits: list[dict] = []
+    for ref in result.get("messages", []):
+        try:
+            msg = service.users().messages().get(
+                userId="me", id=ref["id"], format="metadata",
+                metadataHeaders=["Subject", "From", "Message-ID"],
+            ).execute(num_retries=db.API_RETRIES)
+        except Exception:
+            continue
+        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+        sender = headers.get("From", "")
+        if not any(p in sender.lower() for p in db.TRUSTED_SENDERS):
+            continue
+        hits.append({
+            "sender": _sender_name(sender),
+            "subject": db.decode_mime_words(headers.get("Subject", "(no subject)")),
+            "link": _gmail_link(ref["id"], headers.get("Message-ID")),
+        })
+    return hits
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 — ROUTE: relevance + topic + event flag (schema-enforced JSON)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -686,6 +732,12 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
         body += "\n\n### Also noted\n"
         for e in missing:
             body += f"- [{_sender_name(e['sender'])}]({e['link']}) — {e['subject']}\n"
+    # Every email in `emails` just landed either in the synthesized prose (cited)
+    # or the "Also noted" fallback — mark it so main() can verify, before marking
+    # anything read, that it actually made it into the brief rather than trusting
+    # that invariant blindly (see main()'s mark-read guard).
+    for e in emails:
+        e["_verified"] = True
     return body.strip()
 
 
@@ -825,7 +877,9 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
                    non_relevant: list[dict], personal: list[dict],
                    n_relevant: int, n_total: int, window_label: str,
                    carry: dict[str, list[dict]] | None = None,
-                   title: str | None = None) -> str:
+                   title: str | None = None,
+                   unverified: list[dict] | None = None,
+                   read_before: list[dict] | None = None) -> str:
     now = datetime.now()
     carry = carry or {}
     out = [
@@ -881,6 +935,36 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
         for e in personal:
             out.append(f"- [{_sender_name(e['sender'])}]({e['link']}) — {e['subject']}")
         out += ["", "</details>", ""]
+
+    # Safety net: relevant email that, for whatever reason, never made it into a
+    # synthesized section (see synthesize_topic's `_verified` flag). This should
+    # be structurally impossible in normal operation, but mark_gmail_read only
+    # ever runs on the verified subset — if this ever fires, the guarantee "never
+    # read without a summary" holds anyway, at the cost of leaving these unread
+    # for a manual look instead of silently marking them read.
+    if unverified:
+        out += ["## ⚠ Flagged — Left Unread (Safety Check)",
+                f"<details><summary>{len(unverified)} email(s) were judged relevant "
+                f"but didn't make it into a synthesized section, so they were NOT "
+                f"marked read — please check manually</summary>", ""]
+        for e in unverified:
+            out.append(f"- [{_sender_name(e['sender'])}]({e['link']}) — {e['subject']}")
+        out += ["", "</details>", ""]
+
+    # Mail already read (by you, in Gmail) before this run's fetch even started —
+    # `is:unread` skipped it, so it was never routed and never appears in
+    # Coverage above. Only the curated trusted-source list is checked here (see
+    # find_read_before_fetch); ordinary already-read inbox traffic is expected
+    # and not worth surfacing.
+    if read_before:
+        out += ["## Read Before This Run (Trusted Sources)",
+                "_Already read in Gmail before this run started, so it was never "
+                "routed or summarized. If that was you skimming it, ignore this — "
+                "otherwise open it directly:_", ""]
+        for e in read_before:
+            out.append(f"- [{e['sender']}]({e['link']}) — {e['subject']}")
+        out.append("")
+
     return "\n".join(out)
 
 
@@ -934,7 +1018,19 @@ def main(argv=None) -> None:
     if len(emails) >= limit:
         print(f"  ⚠ hit the --limit safety cap ({limit}) — some mail in the window "
               f"was not fetched; raise --limit if this recurs.")
-    if not emails:
+    # Trusted-source mail already read (by you) before this fetch even ran — see
+    # find_read_before_fetch's docstring-comment for why this needs its own scan
+    # rather than showing up in Coverage. Skipped for --include-read (a
+    # retrospective already sees read mail directly) and --backlog (avoid extra
+    # API cost on a big one-time clear).
+    read_before: list[dict] = []
+    if not args.include_read and not args.backlog:
+        read_before = find_read_before_fetch(service, extra)
+        if read_before:
+            print(f"  ⚠ {len(read_before)} trusted-source email(s) already read "
+                  f"before this run — never routed, listed in the brief for visibility.")
+
+    if not emails and not read_before:
         print("Nothing to brief."); return
 
     print("Stage 1 — routing…")
@@ -983,9 +1079,21 @@ def main(argv=None) -> None:
         print(f"Carrying forward {sum(len(v) for v in carry.values())} unreviewed "
               f"block(s) from the last brief.")
 
+    # Safety net (see synthesize_topic's `_verified` flag and assemble_brief's
+    # "Flagged" section): only mark read what's actually verifiable in the brief
+    # we're about to write. This should always be everything in `relevant` — a
+    # gap here means a future bug, not today's behavior — but the guarantee is
+    # enforced here rather than assumed.
+    to_mark = [e for e in relevant if e.get("_verified")]
+    unverified = [e for e in relevant if not e.get("_verified")]
+    if unverified:
+        print(f"  ⚠ {len(unverified)} relevant email(s) not verified in any "
+              f"synthesized section — will NOT be marked read.")
+
     brief = assemble_brief(sections, events, non_relevant, personal,
                            len(relevant), len(emails), window_label, carry,
-                           title=args.title)
+                           title=args.title, unverified=unverified,
+                           read_before=read_before)
 
     stem = args.out_name or datetime.now().strftime("%Y-%m-%d")
     if args.dry_run:
@@ -1011,11 +1119,11 @@ def main(argv=None) -> None:
         print("  (retrospective run: nothing marked read)")
     elif args.mark_read or not args.backlog:
         try:
-            db.mark_gmail_read(service, [e["id"] for e in relevant])
+            db.mark_gmail_read(service, [e["id"] for e in to_mark])
         except Exception as exc:
             print(f"  ⚠ Could not mark read: {exc}")
     else:
-        print(f"  (backlog run: re-run with --mark-read to clear the {len(relevant)} briefed emails)")
+        print(f"  (backlog run: re-run with --mark-read to clear the {len(to_mark)} briefed emails)")
     print("\nAll done.")
 
 
