@@ -114,6 +114,26 @@ def daily_window_query() -> tuple[str, str]:
     return (f"after:{start.strftime('%Y/%m/%d')}",
             f" · window {start.strftime('%b %-d')}→today ({gap}d)")
 
+
+def same_day_window_query() -> tuple[str, str]:
+    """(gmail_query_terms, human_label) covering ALL of today — read or unread.
+
+    Used when a brief for today already exists (a same-day re-run/update). The
+    normal is:unread window is a one-shot snapshot: once a topic section is
+    written, mail that arrives later on that same topic never gets folded back
+    in, and mail marked read (by the first run, or by you opening it) looks
+    "handled" even when its content was never actually in a section. Rescanning
+    the whole day by DATE rather than by read-state and fully re-synthesizing
+    fixes both — a re-run always reflects everything that's arrived today, not
+    just the delta since the last run. Costs more (re-routes/re-synthesizes
+    today's earlier mail too), which is why it's scoped to today only, not the
+    full since-last-brief window.
+    """
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    return (f"after:{today.strftime('%Y/%m/%d')} before:{tomorrow.strftime('%Y/%m/%d')}",
+            " · same-day rescan (read + unread)")
+
 def _gmail_link(gmail_id: str, rfc822_message_id: str | None) -> str:
     """Best-effort deep link to one message.
 
@@ -1008,12 +1028,25 @@ def main(argv=None) -> None:
     ]))
     # A plain daily run (no explicit window, not a backlog/retrospective) covers
     # everything unread since the last brief — the whole day's arrivals, however
-    # heavy the day, rather than a fixed count of the newest.
+    # heavy the day, rather than a fixed count of the newest. But if a brief for
+    # TODAY already exists, this is a same-day re-run/update — switch to a full
+    # date-range rescan (read + unread) of just today so a topic already written
+    # up gets late arrivals folded back in, rather than looking permanently
+    # "done" the moment its section is first synthesized. See
+    # same_day_window_query()'s docstring.
     fetch_note = ""
+    same_day_rescan = False
     if not extra and not args.backlog and not args.include_read:
-        extra, fetch_note = daily_window_query()
-    emails = fetch_all_unread(service, limit, extra, include_read=args.include_read)
-    print(f"Fetched {len(emails)} unread email(s)"
+        if _last_brief_date() == datetime.now().date():
+            extra, fetch_note = same_day_window_query()
+            same_day_rescan = True
+            print("  (today's brief already exists — rebuilding it from ALL of "
+                  "today's mail, read or unread, instead of just new arrivals)")
+        else:
+            extra, fetch_note = daily_window_query()
+    emails = fetch_all_unread(service, limit, extra,
+                              include_read=(args.include_read or same_day_rescan))
+    print(f"Fetched {len(emails)} email(s)"
           f"{f' [{extra}]' if extra else ''}{fetch_note}.")
     if len(emails) >= limit:
         print(f"  ⚠ hit the --limit safety cap ({limit}) — some mail in the window "
@@ -1021,10 +1054,12 @@ def main(argv=None) -> None:
     # Trusted-source mail already read (by you) before this fetch even ran — see
     # find_read_before_fetch's docstring-comment for why this needs its own scan
     # rather than showing up in Coverage. Skipped for --include-read (a
-    # retrospective already sees read mail directly) and --backlog (avoid extra
-    # API cost on a big one-time clear).
+    # retrospective already sees read mail directly), --backlog (avoid extra API
+    # cost on a big one-time clear), and same_day_rescan (a full rescan already
+    # gives every one of today's already-read emails a real routing decision, so
+    # flagging them here would just be a false-positive echo of that).
     read_before: list[dict] = []
-    if not args.include_read and not args.backlog:
+    if not args.include_read and not args.backlog and not same_day_rescan:
         read_before = find_read_before_fetch(service, extra)
         if read_before:
             print(f"  ⚠ {len(read_before)} trusted-source email(s) already read "
