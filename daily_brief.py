@@ -747,6 +747,27 @@ def _shift_headings(md: str) -> str:
     return re.sub(r"^(#{1,5}) ", lambda m: "#" + m.group(1) + " ", md, flags=re.MULTILINE)
 
 
+def _add_subsection_dividers(md: str) -> str:
+    """Insert a `---` between ANY heading and an immediately-following
+    `- [ ] Reviewed` box.
+
+    Sean's own convention in Today.md (introduced 2026-08-12): heading, `---`,
+    checkbox sit on three consecutive lines with no blank lines anywhere in
+    between — a tight visual block that separates one subsection's tracker
+    from the previous subsection's prose above it. Applies at every heading
+    level that carries a checkbox this way — subtopics (`####` after the
+    vault shift) AND topic-level sections with no subtopics of their own,
+    like `### Upcoming Events` or `### Other` (`###` after the shift). The
+    outer `## Daily Intelligence Brief` wrapper has a metadata line between
+    its heading and box, so it never matches this immediate-next-line
+    pattern and is left as-is.
+    """
+    return re.sub(
+        r"^(#{1,6} .+)\n(- \[[ xX]\] Reviewed)$",
+        r"\1\n---\n\2",
+        md, flags=re.MULTILINE)
+
+
 def insert_into_today(brief_md: str, today_path: Path) -> bool:
     """
     Insert the brief as the second-to-last section of Today.md,
@@ -768,6 +789,7 @@ def insert_into_today(brief_md: str, today_path: Path) -> bool:
     if body_lines and body_lines[0].strip() == "":
         body_lines = body_lines[1:]
     body = _shift_headings("\n".join(body_lines)).strip()
+    body = _add_subsection_dividers(body)
 
     section = f"\n---\n\n## Daily Intelligence Brief\n\n{body}\n"
 

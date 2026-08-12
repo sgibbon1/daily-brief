@@ -619,7 +619,7 @@ Rules:
 - Lead with the day's throughline; where a recurring pattern warrants it, use `### Subtopic` headings.
 - AGGREGATE across sources. When multiple independent outlets converge, say so (real trend). When a claim rests on a SINGLE source, attribute it and don't inflate it. Don't overreact to one datapoint.
 - Use the prior-days context to note whether a theme is BUILDING, CONTINUING, or FADING — only when the context supports it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days context in link syntax — only today's tagged emails can be linked.
-- CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way. Don't invent tags.
+- CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way — EVERY sentence drawing on that email, including a second or third sentence from the SAME source later in the same paragraph, needs its OWN `[desc](E#)`; never fall back to just typing the outlet's name as bare prose. Don't invent tags.
 - Be terse. No filler, no restating. If the material is thin, a few sentences is fine.
 - Output GitHub-flavored markdown ONLY. Do NOT emit the topic name as a heading (it's added for you). Start with prose or a `### Subtopic`."""
 
@@ -721,6 +721,34 @@ def _apply_tags(md: str, tagmap: dict[str, str], namemap: dict[str, str]) -> str
     return re.sub(r"[ ]{2,}", " ", md)  # tidy any double spaces left by a drop
 
 
+def _link_bare_source_names(md: str, emails: list[dict]) -> str:
+    """Safety net for SYNTH_SYSTEM's citation rule. The model reliably brackets
+    the FIRST reference to a source in a paragraph but sometimes drops the
+    bracket on a later sentence citing the same email, leaving the bare sender
+    name sitting in the prose as inert text (e.g. "...raising concerns about
+    weaponization TLDR AI." instead of "...weaponization [TLDR AI](E4).") —
+    `_apply_tags` only touches `[text](E#)`/`(E#)`/`[E#]` patterns, so a bare
+    name with no tag markup at all sails through untouched. Since every
+    sender's own link is already known (it's `emails`, not model output), this
+    mechanically wraps any bare, unlinked occurrence of a sender's exact
+    display name — no LLM call, so no room for a repeat of the drop.
+    Longest names first so a short name can't half-match inside a longer one
+    sharing a prefix (e.g. "FP's James Palmer" vs a hypothetical "FP").
+    """
+    name_to_link: dict[str, str] = {}
+    for e in emails:
+        name = _sender_name(e["sender"])
+        if name:
+            name_to_link.setdefault(name, e["link"])
+    for name in sorted(name_to_link, key=len, reverse=True):
+        link = name_to_link[name]
+        # Skip a match already wrapped as `[Name](url)` — preceded by `[` or
+        # immediately followed by `](`.
+        pattern = re.compile(r"(?<!\[)\b" + re.escape(name) + r"\b(?!\]\()")
+        md = pattern.sub(lambda m, link=link: f"[{m.group(0)}]({link})", md)
+    return md
+
+
 def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
                      tagmap: dict[str, str] | None = None,
                      namemap: dict[str, str] | None = None) -> str:
@@ -748,6 +776,7 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     namemap = namemap or {e["tag"]: _sender_name(e["sender"]) for e in emails}
     missing = [e for e in emails if e["tag"] not in cited]
     body = _apply_tags(raw, tagmap, namemap)
+    body = _link_bare_source_names(body, emails)
     if missing:
         body += "\n\n### Also noted\n"
         for e in missing:
@@ -863,16 +892,36 @@ def _checkbox_body(body: str) -> tuple[str, bool]:
 
     Returns (body, had_subsections). When a section HAS subsections the boxes go
     on them (finer-grained tracking); the caller then omits the section-level box.
-    The box sits IMMEDIATELY under the heading — no blank line between them.
+    The box sits IMMEDIATELY under the heading — no blank line between them. The
+    model sometimes leaves its own blank line after a `### Heading` (natural
+    markdown habit); since the box is inserted after the fact, that blank line
+    would otherwise land between the box and the content instead of between the
+    heading and the box, so it's dropped here to keep spacing tight everywhere.
+
+    The model also sometimes opens a topic with a throughline paragraph BEFORE
+    its first `### Subtopic` (a natural way to lead a synthesis). When the body
+    has real subsections, each of those carries its own box below — but that
+    leading paragraph has no heading of its own to hang a box on, so it reads
+    as un-tracked. Give it a synthetic `### Overview` heading (with its own
+    box) so every paragraph in the section is trackable, not just the ones
+    the model happened to put a subheading on.
     """
     lines = body.splitlines()
+    has_subsections = any(re.match(r"^###\s+\S", l) for l in lines)
     out: list[str] = []
     found = False
-    for line in lines:
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if i == 0 and has_subsections and not re.match(r"^###\s+\S", line):
+            out += ["### Overview", "- [ ] Reviewed"]
         out.append(line)
         if re.match(r"^###\s+\S", line):
             found = True
             out += ["- [ ] Reviewed"]
+            while i + 1 < len(lines) and not lines[i + 1].strip():
+                i += 1
+        i += 1
     return "\n".join(out), found
 
 
