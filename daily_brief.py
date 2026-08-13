@@ -36,7 +36,17 @@ from googleapiclient.discovery import build
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
-load_dotenv(dotenv_path=SCRIPT_DIR / ".env", override=True)
+
+# Secrets load from LOCAL disk first, falling back to the copy in this
+# Drive-synced folder. Reading .env off the Google Drive mount is what killed the
+# 2026-08-12 scheduled run: Drive returns EDEADLK ("Resource deadlock avoided")
+# when it hasn't hydrated the placeholder, and because that read happens at
+# IMPORT time the process died before any retry logic could run. Local disk
+# cannot fail that way. resilient_run.sh refreshes the local copy whenever Drive
+# is healthy, so editing the Drive .env remains the way secrets are managed.
+_LOCAL_ENV = Path.home() / ".config" / "daily_brief" / ".env"
+load_dotenv(dotenv_path=_LOCAL_ENV if _LOCAL_ENV.exists() else SCRIPT_DIR / ".env",
+            override=True)
 CREDENTIALS_DIR = SCRIPT_DIR / "credentials"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 CREDENTIALS_DIR.mkdir(exist_ok=True)
