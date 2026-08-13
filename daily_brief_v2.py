@@ -925,6 +925,38 @@ def _checkbox_body(body: str) -> tuple[str, bool]:
     return "\n".join(out), found
 
 
+def _find_orphan_checkboxes(brief: str) -> list[str]:
+    """Return one description per `- [ ] Reviewed` box that ISN'T immediately
+    preceded (skipping only blank lines) by a heading line.
+
+    A structural safety net, not a generator for the bug it catches. Every
+    `- [ ] Reviewed` box in this file is supposed to always sit right under a
+    heading — `_checkbox_body` and `_render_carried` both guarantee that when
+    they run. This exists for the case where that guarantee is violated
+    anyway: a stale import of this module at execution time (this exact repo
+    lives on a Google Drive mount that has, on other days, served processes a
+    not-yet-hydrated / stale file — see the EDEADLK fix in `daily_brief.py`'s
+    dotenv loading), a future regression, or a genuinely new LLM output shape
+    nobody anticipated. Silent malformed output is the actual failure mode
+    worth closing off — 2026-08-12's brief shipped with one topic's checkbox
+    sitting directly under metadata with no heading above it, and nothing
+    caught it before Sean did by eye the next morning. This makes that loud
+    instead of silent.
+    """
+    lines = brief.splitlines()
+    orphans = []
+    for i, line in enumerate(lines):
+        if not re.match(r"^- \[[ xX]\] Reviewed\s*$", line):
+            continue
+        j = i - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        if j < 0 or not re.match(r"^#{1,6}\s+\S", lines[j]):
+            context = lines[j] if j >= 0 else "(start of file)"
+            orphans.append(f"line {i + 1} (preceding non-blank line: {context!r})")
+    return orphans
+
+
 def _render_carried(items: list[dict]) -> list[str]:
     """Re-emit unreviewed blocks from the last brief, each keeping its own box and
     its ORIGINAL date so the age cap survives repeated carrying."""
@@ -1178,6 +1210,16 @@ def main(argv=None) -> None:
                            len(relevant), len(emails), window_label, carry,
                            title=args.title, unverified=unverified,
                            read_before=read_before)
+
+    orphans = _find_orphan_checkboxes(brief)
+    if orphans:
+        print(f"  ⚠⚠⚠ STRUCTURAL WARNING: {len(orphans)} checkbox(es) with no "
+              f"heading directly above them — a section is about to ship "
+              f"without a visible header. This should be impossible; "
+              f"investigate _checkbox_body / the module actually loaded at "
+              f"runtime. Offending spot(s):")
+        for o in orphans:
+            print(f"      {o}")
 
     stem = args.out_name or datetime.now().strftime("%Y-%m-%d")
     if args.dry_run:
