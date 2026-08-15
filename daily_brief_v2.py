@@ -172,6 +172,23 @@ def _gmail_link(gmail_id: str, rfc822_message_id: str | None) -> str:
     return f"https://mail.google.com/mail/u/0/#all/{gmail_id}"
 
 
+def _headers_ci(header_list: list[dict]) -> dict[str, str]:
+    """Gmail API header list → dict keyed by LOWERCASED header name.
+
+    RFC 5322 header field names are case-insensitive, but not every sender's
+    mail server capitalizes them the conventional way — FT's myFT digest sends
+    `Message-Id`, not `Message-ID`. A dict built with the raw (as-sent) casing
+    and looked up with a hardcoded "Message-ID" silently misses that mail: the
+    lookup returns None, `_gmail_link` has no RFC822 ID to build a `message://`
+    link from, and falls back to a Gmail-web `#all/<id>` link instead — which
+    is exactly why myFT's links open in Gmail while everything else opens in
+    Mail. Lowercasing the key at construction (and looking up with lowercase
+    names everywhere this is used) makes the lookup match regardless of how
+    the sender capitalized it.
+    """
+    return {h["name"].lower(): h["value"] for h in header_list}
+
+
 def fetch_all_unread(service, limit: int, extra_query: str = "",
                      include_read: bool = False) -> list[dict]:
     """Mail newest-first, unread-only unless `include_read`.
@@ -211,13 +228,13 @@ def fetch_all_unread(service, limit: int, extra_query: str = "",
         except Exception as exc:
             print(f"  ⚠ could not fetch {ref['id']}: {exc}")
             return None
-        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+        headers = _headers_ci(msg["payload"].get("headers", []))
         # Normalize to timezone-AWARE. parsedate_to_datetime returns an aware
         # datetime when the header carries an offset (nearly always) and a naive
         # one when it doesn't; mixing the two makes any sort or subtraction throw
         # "can't compare offset-naive and offset-aware datetimes".
         try:
-            date = parsedate_to_datetime(headers.get("Date", ""))
+            date = parsedate_to_datetime(headers.get("date", ""))
         except Exception:
             date = None
         if date is None:
@@ -227,11 +244,11 @@ def fetch_all_unread(service, limit: int, extra_query: str = "",
         return {
             "id": ref["id"],
             "account": "ND Alumni (alumni.nd.edu)",
-            "subject": db.decode_mime_words(headers.get("Subject", "(no subject)")),
-            "sender": headers.get("From", "Unknown"),
+            "subject": db.decode_mime_words(headers.get("subject", "(no subject)")),
+            "sender": headers.get("from", "Unknown"),
             "date": date,
             "body": db._extract_gmail_body(msg["payload"])[:db.MAX_BODY_CHARS_FETCH],
-            "link": _gmail_link(ref["id"], headers.get("Message-ID")),
+            "link": _gmail_link(ref["id"], headers.get("message-id")),
         }
 
     # Sequential fetch of a few thousand messages takes ~40 min; threaded, ~1.
@@ -313,14 +330,14 @@ def find_read_before_fetch(service, extra_query: str) -> list[dict]:
             ).execute(num_retries=db.API_RETRIES)
         except Exception:
             continue
-        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
-        sender = headers.get("From", "")
+        headers = _headers_ci(msg["payload"].get("headers", []))
+        sender = headers.get("from", "")
         if not any(p in sender.lower() for p in db.TRUSTED_SENDERS):
             continue
         hits.append({
             "sender": _sender_name(sender),
-            "subject": db.decode_mime_words(headers.get("Subject", "(no subject)")),
-            "link": _gmail_link(ref["id"], headers.get("Message-ID")),
+            "subject": db.decode_mime_words(headers.get("subject", "(no subject)")),
+            "link": _gmail_link(ref["id"], headers.get("message-id")),
         })
     return hits
 
