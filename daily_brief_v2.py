@@ -586,6 +586,17 @@ def collect_carryover() -> dict[str, list[dict]]:
     def _clean(body: str) -> str:
         body = _REVIEWED_BOX_RE.sub("", body)
         body = _CARRY_LINE_RE.sub("", body)
+        # A standalone "---" is a VAULT-rendering artifact — insert_into_today's
+        # _add_subsection_dividers (daily_brief.py) bakes one into the Today.md
+        # copy, which then gets archived and read back in here. Left in, it
+        # compounds: each day this block is re-carried, insert_into_today adds
+        # ANOTHER "---" on top of the one already carried in the body, so an
+        # item unreviewed for a week accumulates a stack of them. Strip it here
+        # so the carried body is divider-free, matching freshly-synthesized
+        # text, and insert_into_today adds exactly one correctly-placed "---"
+        # each time regardless of how many days this block has been carried.
+        body = re.sub(r"^---[ \t]*$\n?", "", body, flags=re.MULTILINE)
+        body = _strip_inline_bold(body)
         return body.strip()
 
     carry: dict[str, list[dict]] = {}
@@ -636,6 +647,7 @@ Rules:
 - Lead with the day's throughline; where a recurring pattern warrants it, use `### Subtopic` headings.
 - AGGREGATE across sources. When multiple independent outlets converge, say so (real trend). When a claim rests on a SINGLE source, attribute it and don't inflate it. Don't overreact to one datapoint.
 - Use the prior-days context to note whether a theme is BUILDING, CONTINUING, or FADING — only when the context supports it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days context in link syntax — only today's tagged emails can be linked.
+- NO markdown bold (`**text**`) anywhere in the prose, including on BUILDING/CONTINUING/FADING and other trend words — state the trend in plain text (e.g. "a continuing theme", "is building").
 - CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way — EVERY sentence drawing on that email, including a second or third sentence from the SAME source later in the same paragraph, needs its OWN `[desc](E#)`; never fall back to just typing the outlet's name as bare prose. Don't invent tags.
 - Be terse. No filler, no restating. If the material is thin, a few sentences is fine.
 - Output GitHub-flavored markdown ONLY. Do NOT emit the topic name as a heading (it's added for you). Start with prose or a `### Subtopic`."""
@@ -707,6 +719,18 @@ def _synth_call(topic: str, blocks: list[str], context: str,
     ).strip()
 
 
+def _strip_inline_bold(md: str) -> str:
+    """Remove markdown bold (`**text**`) from prose, keeping the text itself.
+
+    The brief never intends bold as a formatting element (headers use `#`, not
+    bold) — this is a belt-and-suspenders backstop for SYNTH_SYSTEM's
+    no-bold rule, since an LLM instruction isn't a hard guarantee. Applied to
+    both freshly-synthesized text and carried-forward text, since carried
+    content can be several days old and predate this fix.
+    """
+    return re.sub(r"\*\*(.+?)\*\*", r"\1", md)
+
+
 def _apply_tags(md: str, tagmap: dict[str, str], namemap: dict[str, str]) -> str:
     """Turn every email-tag citation into a real clickable URL, whatever form the
     model emitted — proper `[desc](E#)`, bare `(E#)`, or bare `[E#]`. The link TEXT
@@ -751,6 +775,16 @@ def _link_bare_source_names(md: str, emails: list[dict]) -> str:
     display name — no LLM call, so no room for a repeat of the drop.
     Longest names first so a short name can't half-match inside a longer one
     sharing a prefix (e.g. "FP's James Palmer" vs a hypothetical "FP").
+
+    Many sender display names are themselves "X from Y" author+publication
+    citations (Substack's convention, e.g. "Al Mauroni from Nuclear Weapons
+    (and other WMD)") — `\\b` at the trailing edge of a name ending in
+    punctuation like `)` never matches, because `\\b` needs a word-char/
+    non-word-char TRANSITION, and both the `)` and whatever follows it in
+    prose (another punctuation mark, or a space) are non-word characters. So
+    a name ending in `)` immediately followed by "." or ", " — the normal
+    case in a sentence — silently failed to link. `(?<!\\w)`/`(?!\\w)` check
+    only one side each and don't have that blind spot.
     """
     name_to_link: dict[str, str] = {}
     for e in emails:
@@ -761,7 +795,8 @@ def _link_bare_source_names(md: str, emails: list[dict]) -> str:
         link = name_to_link[name]
         # Skip a match already wrapped as `[Name](url)` — preceded by `[` or
         # immediately followed by `](`.
-        pattern = re.compile(r"(?<!\[)\b" + re.escape(name) + r"\b(?!\]\()")
+        pattern = re.compile(
+            r"(?<!\[)(?<!\w)" + re.escape(name) + r"(?!\w)(?!\]\()")
         md = pattern.sub(lambda m, link=link: f"[{m.group(0)}]({link})", md)
     return md
 
@@ -794,6 +829,7 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     missing = [e for e in emails if e["tag"] not in cited]
     body = _apply_tags(raw, tagmap, namemap)
     body = _link_bare_source_names(body, emails)
+    body = _strip_inline_bold(body)
     if missing:
         body += "\n\n### Also noted\n"
         for e in missing:
@@ -909,11 +945,14 @@ def _checkbox_body(body: str) -> tuple[str, bool]:
 
     Returns (body, had_subsections). When a section HAS subsections the boxes go
     on them (finer-grained tracking); the caller then omits the section-level box.
-    The box sits IMMEDIATELY under the heading — no blank line between them. The
+    The box sits IMMEDIATELY under the heading — no blank line between them —
+    but IS followed by exactly one blank line before the content (Obsidian
+    renders a checkbox glued to the next paragraph as one run-on block). The
     model sometimes leaves its own blank line after a `### Heading` (natural
     markdown habit); since the box is inserted after the fact, that blank line
-    would otherwise land between the box and the content instead of between the
-    heading and the box, so it's dropped here to keep spacing tight everywhere.
+    would otherwise land between the heading and the box instead of between the
+    box and the content, so the source's blank line is dropped and a single one
+    is re-inserted after the box instead.
 
     The model also sometimes opens a topic with a throughline paragraph BEFORE
     its first `### Subtopic` (a natural way to lead a synthesis). When the body
@@ -931,11 +970,11 @@ def _checkbox_body(body: str) -> tuple[str, bool]:
     while i < len(lines):
         line = lines[i]
         if i == 0 and has_subsections and not re.match(r"^###\s+\S", line):
-            out += ["### Overview", "- [ ] Reviewed"]
+            out += ["### Overview", "- [ ] Reviewed", ""]
         out.append(line)
         if re.match(r"^###\s+\S", line):
             found = True
-            out += ["- [ ] Reviewed"]
+            out += ["- [ ] Reviewed", ""]
             while i + 1 < len(lines) and not lines[i + 1].strip():
                 i += 1
         i += 1
@@ -986,6 +1025,7 @@ def _render_carried(items: list[dict]) -> list[str]:
             pretty = since
         out += [f"### {it['title']}",
                 "- [ ] Reviewed",
+                "",
                 f"_Carried forward from {since} ({pretty}) — not yet reviewed._",
                 "", it["body"], ""]
     return out
@@ -1009,7 +1049,7 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
         body = sections.get(topic)
         carried = carry.get(topic, [])
         if not body and not carried:
-            out += [f"## {topic}", "- [ ] Reviewed",
+            out += [f"## {topic}", "- [ ] Reviewed", "",
                     "_No significant developments._", ""]
             continue
         out += [f"## {topic}"]
@@ -1018,13 +1058,13 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
             # section with no `###` subsections carries its own checkbox.
             boxed, has_subs = _checkbox_body(body)
             if not has_subs:
-                out += ["- [ ] Reviewed"]
+                out += ["- [ ] Reviewed", ""]
             out += [boxed, ""]
         elif carried:
             out += ["_No new developments today; unreviewed items below._", ""]
         out += _render_carried(carried)
 
-    out += ["## Upcoming Events (DC Metro & Virtual)", "- [ ] Reviewed"]
+    out += ["## Upcoming Events (DC Metro & Virtual)", "- [ ] Reviewed", ""]
     if events:
         for ev in events:
             link = f" · [details →]({ev['link']})" if ev.get("link") else ""
