@@ -7,10 +7,16 @@ New model (vs the per-email daily_brief.py it will replace):
   - Two LLM stages (map-reduce):
       Stage 1 ROUTE   — cheap batched classify: {relevant?, which topic?, event?}.
                         Tiny schema-enforced JSON; nothing to mis-escape.
-      Stage 2 SYNTH   — one call per topic; reads all that topic's email PLUS the
-                        last few days' coverage of the same topic (cross-day trend
-                        memory); writes markdown with `###` subtopics and inline
-                        `[desc](E#)` TAG citations that we substitute for real URLs.
+      Stage 2 SYNTH   — one call per topic; reads all that topic's email PLUS its
+                        FULL archive history (cross-day trend memory, no day
+                        limit) PLUS any of the reader's still-unreviewed prior
+                        write-ups on this topic, which it's asked to UPDATE and
+                        merge into the fresh synthesis rather than repeat as a
+                        separate block — the brief distills trends over however
+                        long it's been left unread, instead of accumulating
+                        parallel near-duplicate sections; writes markdown with
+                        `###` subtopics and inline `[desc](E#)` TAG citations
+                        that we substitute for real URLs.
   - Coverage is mechanically verifiable:
       * link integrity — model cites tags (E1, E2…), never raw URLs, so a link can
         never be fabricated or cross-wired; unknown tags are dropped.
@@ -55,8 +61,6 @@ TOPICS_ORDERED = [
 ]
 _VALID_TOPICS = set(TOPICS_ORDERED)
 
-CONTEXT_DAYS = 5
-CONTEXT_CHARS = 2500
 # Trusted newsletters (WOTR, Economist, Lawfare, ChinaTalk…) are long-form: the
 # substance sits well past the masthead/intro, so they get a much deeper read at
 # BOTH stages. Routing on a shallow slice was judging a long issue on its opening
@@ -450,11 +454,18 @@ def _archive_dir() -> Path | None:
     return d if d.exists() else None
 
 
-def recent_context(topic: str, n_days: int = CONTEXT_DAYS) -> str:
+def recent_context(topic: str) -> str:
+    """Every archived day's coverage of `topic`, oldest first — no day limit and
+    no truncation. Sean wants trend continuity even across a month-long gap, so
+    this deliberately scans the WHOLE archive rather than a fixed recent window;
+    the merge-based carry-forward below (see `collect_carryover`) is what keeps
+    this from growing without bound in practice — once an ongoing thread is
+    folded into a fresh synthesis, later days build on that compact summary
+    rather than re-reading the raw history that produced it."""
     d = _archive_dir()
     if not d:
         return ""
-    files = sorted(d.glob("*.md"), reverse=True)[:n_days]
+    files = sorted(d.glob("*.md"), reverse=True)
     pat = re.compile(
         rf"^#{{2,4}}\s+{re.escape(topic)}\s*$\n(.*?)(?=^#{{1,4}}\s+\S|\Z)",
         re.MULTILINE | re.DOTALL,
@@ -467,7 +478,7 @@ def recent_context(topic: str, n_days: int = CONTEXT_DAYS) -> str:
             continue
         if m and m.group(1).strip():
             slices.append(f"[{f.stem}]\n{m.group(1).strip()}")
-    return ("\n\n".join(slices))[:CONTEXT_CHARS]
+    return "\n\n".join(slices)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -484,10 +495,12 @@ def recent_context(topic: str, n_days: int = CONTEXT_DAYS) -> str:
 #     the archived copy reads `### Topic` / `#### Subtopic`. We match topics by
 #     NAME at any level and renormalize on the way back out.
 #  2. Carried blocks get re-carried. The "carried from" line records the ORIGINAL
-#     date, and re-carrying preserves it — otherwise the age cap would never fire
-#     and an ignored item would live forever.
+#     date, and re-carrying preserves it, so the "since" shown to the reader is
+#     always when the thread first opened, however many days it's been open —
+#     there is no age cutoff; an item lives until reviewed or until it gets
+#     folded into a fresh synthesis on some topic-relevant day (see main()'s
+#     merge step).
 
-CARRY_MAX_DAYS = 7
 _CARRY_LINE_RE = re.compile(r"^_Carried forward from ([0-9]{4}-[0-9]{2}-[0-9]{2})\b.*_$", re.M)
 _REVIEWED_BOX_RE = re.compile(r"^- \[([ xX])\]\s*Reviewed\s*$", re.M)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*$", re.M)
@@ -565,7 +578,6 @@ def collect_carryover() -> dict[str, list[dict]]:
         return {}
     prior_date, text = prior
     reviewed = _already_reviewed_today()
-    cutoff = datetime.now().date() - timedelta(days=CARRY_MAX_DAYS)
 
     # Topics may sit at ## (raw brief) or ### (archived copy) — find their level.
     levels = {lv for m in _HEADING_RE.finditer(text)
@@ -574,14 +586,9 @@ def collect_carryover() -> dict[str, list[dict]]:
         return {}
     tlevel = min(levels)
 
-    def _age_ok(body: str) -> tuple[bool, str]:
+    def _since(body: str) -> str:
         m = _CARRY_LINE_RE.search(body)
-        since = m.group(1) if m else prior_date
-        try:
-            keep = datetime.strptime(since, "%Y-%m-%d").date() >= cutoff
-        except ValueError:
-            keep = True
-        return keep, since
+        return m.group(1) if m else prior_date
 
     def _clean(body: str) -> str:
         body = _REVIEWED_BOX_RE.sub("", body)
@@ -611,9 +618,9 @@ def collect_carryover() -> dict[str, list[dict]]:
                 box = _REVIEWED_BOX_RE.search(sub_body)
                 if not box or box.group(1).lower() == "x":
                     continue          # ticked, or never had a box — nothing owed
-                keep, since = _age_ok(sub_body)
+                since = _since(sub_body)
                 cleaned = _clean(sub_body)
-                if keep and cleaned:
+                if cleaned:
                     # Renormalize to generation levels: this sub becomes a `###`.
                     carry.setdefault(topic.strip(), []).append({
                         "title": sub_title.strip(),
@@ -625,9 +632,9 @@ def collect_carryover() -> dict[str, list[dict]]:
             box = _REVIEWED_BOX_RE.search(body)
             if not box or box.group(1).lower() == "x":
                 continue
-            keep, since = _age_ok(body)
+            since = _since(body)
             cleaned = _clean(body)
-            if keep and cleaned and "_No significant developments._" not in cleaned:
+            if cleaned and "_No significant developments._" not in cleaned:
                 carry.setdefault(topic.strip(), []).append({
                     "title": "Carried forward",
                     "body": _shift_headings(cleaned, 3 - (tlevel + 1)),
@@ -641,14 +648,15 @@ def collect_carryover() -> dict[str, list[dict]]:
 
 SYNTH_SYSTEM = """You are a senior intelligence analyst writing ONE topic section of a DoD official's daily brief.
 
-You get today's emails on this topic (often several outlets), each labeled with a TAG like [E3], and this topic's coverage from the last few days for context. Write a concise, trend-focused synthesis — the throughline of what's developing, not a list of what each email said.
+You get today's emails on this topic (often several outlets) each labeled with a TAG like [E3], this topic's full archive history for trend context, and — when there's a backlog — ONGOING THREADS: topic write-ups from prior days the reader hasn't reviewed yet. Write a concise, trend-focused synthesis — the throughline of what's developing, not a list of what each email said.
 
 Rules:
 - Lead with the day's throughline; where a recurring pattern warrants it, use `### Subtopic` headings.
 - AGGREGATE across sources. When multiple independent outlets converge, say so (real trend). When a claim rests on a SINGLE source, attribute it and don't inflate it. Don't overreact to one datapoint.
-- Use the prior-days context to note whether a theme is BUILDING, CONTINUING, or FADING — only when the context supports it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days context in link syntax — only today's tagged emails can be linked.
+- Use the archive context to note whether a theme is BUILDING, CONTINUING, or FADING — only when the context supports it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days context in link syntax — only today's tagged emails can be linked.
+- ONGOING THREADS — this is the reader's unread backlog on this topic, not just background. The reader wants trends distilled over time, not the same ground re-reported day after day. For each ongoing thread: if today's emails genuinely develop it further, UPDATE it — merge the new development into that thread's throughline under a recognizable `### Subtopic` heading (reuse or closely echo its original title) rather than writing a separate, parallel section that repeats what it already said. If today's emails don't touch it at all, still include it (restate its existing throughline briefly, close to as-written) so it isn't silently dropped before the reader has seen it — do not fabricate new movement for it. Only give a genuinely unrelated development its own new `### Subtopic` with no ongoing-thread counterpart.
 - NO markdown bold (`**text**`) anywhere in the prose, including on BUILDING/CONTINUING/FADING and other trend words — state the trend in plain text (e.g. "a continuing theme", "is building").
-- CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way — EVERY sentence drawing on that email, including a second or third sentence from the SAME source later in the same paragraph, needs its OWN `[desc](E#)`; never fall back to just typing the outlet's name as bare prose. Don't invent tags.
+- CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way — EVERY sentence drawing on that email, including a second or third sentence from the SAME source later in the same paragraph, needs its OWN `[desc](E#)`; never fall back to just typing the outlet's name as bare prose. Don't invent tags. An ongoing thread's OWN prior text may already contain real `[name](url)` links from when it was first written — keep those as-is; they are not tags and don't need re-citing.
 - Be terse. No filler, no restating. If the material is thin, a few sentences is fine.
 - Output GitHub-flavored markdown ONLY. Do NOT emit the topic name as a heading (it's added for you). Start with prose or a `### Subtopic`."""
 
@@ -697,20 +705,33 @@ TOPIC_GUIDANCE = {
 }
 
 
+def _carried_block(item: dict) -> str:
+    return (f"[ONGOING since {item['since']}] \"{item['title']}\"\n---\n"
+            f"{item['body']}\n")
+
+
 def _synth_call(topic: str, blocks: list[str], context: str,
-                is_reduce: bool, expanded: bool) -> str:
+                is_reduce: bool, expanded: bool,
+                carried_blocks: list[str] | None = None) -> str:
     guidance = TOPIC_GUIDANCE.get(topic, "")
+    carried_note = ""
+    if carried_blocks:
+        carried_note = (
+            "\n\nONGOING THREADS (the reader's unread backlog on this topic — "
+            "update the ones today's emails develop further, restate the rest "
+            "briefly so nothing is dropped; see the ONGOING THREADS rule):\n\n"
+            + "\n\n".join(carried_blocks))
     if is_reduce:
         user = (f"TOPIC: {topic}\n\nMERGE these partial write-ups into one clean, "
                 f"well-organized section. Remove repetition, KEEP every [E#] tag "
                 f"citation and every distinct development."
-                f"{guidance}{_EXPAND_NOTE if expanded else ''}\n\nPARTIALS:\n\n"
-                + "\n\n---\n\n".join(blocks))
+                f"{guidance}{_EXPAND_NOTE if expanded else ''}{carried_note}"
+                f"\n\nPARTIALS:\n\n" + "\n\n---\n\n".join(blocks))
     else:
-        user = (f"TOPIC: {topic}\n\nPRIOR COVERAGE (last {CONTEXT_DAYS} days, context "
+        user = (f"TOPIC: {topic}\n\nPRIOR COVERAGE (full archive history, context "
                 f"only):\n{context or '(none available)'}"
-                f"{guidance}{_EXPAND_NOTE if expanded else ''}\n\nEMAILS:\n\n"
-                + "\n\n".join(blocks))
+                f"{guidance}{_EXPAND_NOTE if expanded else ''}{carried_note}"
+                f"\n\nEMAILS:\n\n" + "\n\n".join(blocks))
     return complete(
         system=SYNTH_SYSTEM, user=user,
         max_tokens=4200 if expanded else 2600, thinking_level="low",
@@ -803,17 +824,26 @@ def _link_bare_source_names(md: str, emails: list[dict]) -> str:
 
 def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
                      tagmap: dict[str, str] | None = None,
-                     namemap: dict[str, str] | None = None) -> str:
+                     namemap: dict[str, str] | None = None,
+                     carried: list[dict] | None = None) -> str:
     context = recent_context(topic)
     blocks = [_synth_block(e) for e in emails]
+    # Ongoing (unreviewed) threads for this topic — see the ONGOING THREADS rule
+    # in SYNTH_SYSTEM. Only handed to the FINAL call (the reduce step when
+    # sub-batching, otherwise the single call): merging is a whole-section
+    # judgment, and giving it to every partial would risk each partial
+    # separately re-stating the same backlog instead of one clean merge.
+    carried_blocks = [_carried_block(it) for it in carried] if carried else None
     # Sub-batch (map-reduce) whenever the bucket is large — a natural multi-day
     # catch-up gets the same completeness treatment as an explicit --backlog run.
     if len(blocks) > SYNTH_SUBBATCH:
         partials = [_synth_call(topic, blocks[s:s + SYNTH_SUBBATCH], context, False, expanded)
                     for s in range(0, len(blocks), SYNTH_SUBBATCH)]
-        raw = _synth_call(topic, partials, context, is_reduce=True, expanded=expanded)
+        raw = _synth_call(topic, partials, context, is_reduce=True, expanded=expanded,
+                          carried_blocks=carried_blocks)
     else:
-        raw = _synth_call(topic, blocks, context, is_reduce=False, expanded=expanded)
+        raw = _synth_call(topic, blocks, context, is_reduce=False, expanded=expanded,
+                          carried_blocks=carried_blocks)
 
     # In-bucket completeness: any relevant email whose tag never got cited is
     # appended under "### Also noted" so a small item can't vanish silently.
@@ -1230,27 +1260,46 @@ def main(argv=None) -> None:
     for e in relevant:
         by_topic.setdefault(e.get("topic") or "Other", []).append(e)
 
+    # Collected BEFORE synthesis (not after) so each topic's unreviewed backlog
+    # can be handed to that topic's OWN synthesis call and merged into one
+    # updated section, instead of being tacked on afterward as a separate,
+    # frozen, potentially-redundant block (see SYNTH_SYSTEM's ONGOING THREADS
+    # rule).
+    carry = {} if args.no_carry else collect_carryover()
+    if carry:
+        print(f"Carrying forward {sum(len(v) for v in carry.values())} unreviewed "
+              f"block(s) from the last brief.")
+
     print("Stage 2 — synthesizing per topic…")
     global_tagmap = {e["tag"]: e["link"] for e in emails}
     global_namemap = {e["tag"]: _sender_name(e["sender"]) for e in emails}
     sections: dict[str, str] = {}
+    merged_topics: list[str] = []
     for topic in TOPICS_ORDERED:
         bucket = by_topic.get(topic)
         if bucket:
             expanded = (args.backlog or len(bucket) >= EXPAND_EMAIL_THRESHOLD
                         or window_days >= 2)
-            print(f"  {topic}: {len(bucket)} email(s){' [expanded]' if expanded else ''}")
+            carried_items = carry.get(topic)
+            note = f" + {len(carried_items)} ongoing thread(s)" if carried_items else ""
+            print(f"  {topic}: {len(bucket)} email(s){note}{' [expanded]' if expanded else ''}")
             sections[topic] = synthesize_topic(topic, bucket, expanded,
-                                               global_tagmap, global_namemap)
+                                               global_tagmap, global_namemap,
+                                               carried=carried_items)
+            if carried_items:
+                merged_topics.append(topic)
+
+    # Threads folded into a fresh synthesis above are now represented there —
+    # drop them from `carry` so assemble_brief()'s separate _render_carried()
+    # path doesn't ALSO re-emit them as a parallel frozen block. Only topics
+    # with no fresh mail at all (nothing to merge into) still flow through
+    # that path unchanged.
+    for topic in merged_topics:
+        carry.pop(topic, None)
 
     print("Extracting events…")
     events = extract_events(emails)
     print(f"  {len(events)} event(s).")
-
-    carry = {} if args.no_carry else collect_carryover()
-    if carry:
-        print(f"Carrying forward {sum(len(v) for v in carry.values())} unreviewed "
-              f"block(s) from the last brief.")
 
     # Safety net (see synthesize_topic's `_verified` flag and assemble_brief's
     # "Flagged" section): only mark read what's actually verifiable in the brief
