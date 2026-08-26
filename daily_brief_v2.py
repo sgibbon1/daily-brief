@@ -52,14 +52,41 @@ import daily_brief as db
 from llm import complete, get_ai_provider
 
 TOPICS_ORDERED = [
-    "Artificial Intelligence & Emerging Technology",
-    "National Security & Defense Technology",
+    "Artificial Intelligence & Other Emerging Technologies",
+    "United States National Security Policy",
     "China & Indo-Pacific Competition",
-    "Economic Competition & Geopolitics",
+    "Geopolitics & Geoeconomics",
     "Russia, Ukraine & Eastern Europe",
-    "Other",
+    "Other National Security",
 ]
 _VALID_TOPICS = set(TOPICS_ORDERED)
+
+# Renamed 2026-08-25. Archived briefs still carry the OLD headings, and both
+# recent_context() and collect_carryover() find sections BY NAME — so without
+# these aliases each renamed topic would lose its entire trend history and any
+# unreviewed carry-forward the moment the rename landed.
+TOPIC_ALIASES = {
+    "Artificial Intelligence & Other Emerging Technologies":
+        ["Artificial Intelligence & Emerging Technology"],
+    "United States National Security Policy":
+        ["National Security & Defense Technology"],
+    "Geopolitics & Geoeconomics":
+        ["Economic Competition & Geopolitics"],
+    "Other National Security": ["Other"],
+}
+
+
+def topic_names(topic: str) -> list[str]:
+    """Current name first, then any historical names it was archived under."""
+    return [topic] + TOPIC_ALIASES.get(topic, [])
+
+
+# Every name a topic section may appear under in an archived brief, plus the
+# reverse map that normalises a historical heading back to its current name.
+_ALL_TOPIC_NAMES = {n for tp in TOPICS_ORDERED for n in topic_names(tp)}
+_CANONICAL_TOPIC = {old: tp for tp in TOPICS_ORDERED for old in TOPIC_ALIASES.get(tp, [])}
+
+
 
 # Trusted newsletters (WOTR, Economist, Lawfare, ChinaTalk…) are long-form: the
 # substance sits well past the masthead/intro, so they get a much deeper read at
@@ -354,13 +381,13 @@ ROUTE_SYSTEM = """You triage incoming email for a DoD official's daily intellige
 
 For each email decide:
 1. relevant: does it have SUBSTANTIVE content (real coverage, not a passing mention) with a clear geopolitical, national-security/intelligence, or technology nexus? Map relevant email to the single best-fit area:
-     - Artificial Intelligence & Emerging Technology
-     - National Security & Defense Technology
+     - Artificial Intelligence & Other Emerging Technologies — emerging technology with a defense/national-security hook: AI, autonomy, biotech, quantum, space, microelectronics, EW/cyber capability, and Ukrainian defense technology.
+     - United States National Security Policy — U.S. strategy, doctrine, force posture, defense budget and acquisition, the defense industrial base, alliances, civil-military relations, intelligence, nuclear posture, leadership/personnel.
      - China & Indo-Pacific Competition
-     - Economic Competition & Geopolitics
-     - Russia, Ukraine & Eastern Europe
-   STRONGLY prefer one of the five named areas — a nuclear/proliferation or Middle East security story is National Security & Defense Technology, a trade/sanctions story is Economic Competition, etc. Only fall back to "Other" when NO named area fits.
-   Use topic "Other" ONLY for email whose SUBSTANCE is geopolitical/intel/tech but genuinely fits none of the five areas — e.g. Latin America / Africa / Arctic security, space or cyber policy, nuclear proliferation dynamics outside the five regions, a novel emerging-tech domain. "Other" is a NARROW bucket, usually empty. It is NOT for: arts/literary/culture events (an FT Weekend Festival, a book festival), general-interest news digests, book/film reviews, or anything whose subject is not itself geopolitical/intel/tech. When unsure whether something belongs in "Other," it does NOT — set relevant=false.
+     - Geopolitics & Geoeconomics — the political economy of statecraft: economic/fiscal/monetary policy as national power, industrial policy, critical minerals, energy, trade and export controls, sanctions and economic warfare, investment screening, financial statecraft.
+     - Russia, Ukraine & Eastern Europe — the war, Russian politics and society, and regional security. Ukrainian DEFENSE TECHNOLOGY routes to the emerging-technology area instead.
+   STRONGLY prefer one of the five named areas — a nuclear/proliferation or Middle East security story is United States National Security Policy, a trade/sanctions/critical-minerals story is Geopolitics & Geoeconomics, a drone or chip story is Artificial Intelligence & Other Emerging Technologies. Only fall back to "Other National Security" when NO named area fits.
+   Use topic "Other National Security" ONLY for email whose SUBSTANCE is geopolitical/intel/tech but genuinely fits none of the five areas — e.g. Latin America / Africa / Arctic security, space or cyber policy, nuclear proliferation dynamics outside the five regions, a novel emerging-tech domain. "Other National Security" is a NARROW bucket, usually empty. It is NOT for: arts/literary/culture events (an FT Weekend Festival, a book festival), general-interest news digests, book/film reviews, or anything whose subject is not itself geopolitical/intel/tech. When unsure whether something belongs in "Other National Security," it does NOT — set relevant=false.
 2. topic: the best-fit area, or "Other" (only per the rule above).
 3. is_event: does it announce a specific UPCOMING event a policy professional might attend (in-person or virtual)? (Independent of relevance.)
 4. personal: is this PERSONAL or PROFESSIONAL CORRESPONDENCE directed at the reader as an individual, rather than a publication sent to a subscriber list? Set personal=TRUE for: mail from a named human writing to the reader; anything from an employer, client, colleague, business partner, or their company domain (e.g. Legion Intelligence); recruiters and job-application/interview correspondence; professional-network and social notifications (LinkedIn invitations, messages, job alerts); calendar invites, contracts and e-signature requests; account, billing, medical, financial, legal, or school/family mail; anything the reader plainly needs to ACT on personally. When in doubt about whether something is addressed to him personally, set personal=TRUE — the cost of wrongly briefing a personal email is far higher than the cost of skipping a newsletter.
@@ -372,7 +399,7 @@ Set relevant=FALSE — do not force into "Other" — for anything WITHOUT that n
 Emails tagged [TRUSTED SOURCE] are curated intel/policy/tech publications and are usually LONG-FORM DIGESTS covering several stories in one issue. Read the WHOLE excerpt before judging — the on-domain substance is often further down, past the masthead, subject line, and opening item. If ANY meaningful part of the issue has the nexus, mark it relevant and pick the topic that best fits that part. Only mark a trusted source non-relevant when the entire issue is off-domain or non-editorial (a subscription/marketing promo, a hiring notice, an event-only blast).
 
 Return ONLY a JSON array, one object per email in order:
-{"email_index": <int>, "relevant": <bool>, "topic": "<area or 'Other'>", "is_event": <bool>, "personal": <bool>}."""
+{"email_index": <int>, "relevant": <bool>, "topic": "<area or 'Other National Security'>", "is_event": <bool>, "personal": <bool>}."""
 
 ROUTE_SCHEMA = {
     "type": "array",
@@ -426,9 +453,9 @@ def route_emails(emails: list[dict]) -> None:
         for v in verdicts:
             idx = v.get("email_index", -1)
             if 0 <= idx < len(batch):
-                topic = v.get("topic", "Other")
+                topic = v.get("topic", "Other National Security")
                 batch[idx]["relevant"] = bool(v.get("relevant"))
-                batch[idx]["topic"] = topic if topic in _VALID_TOPICS else "Other"
+                batch[idx]["topic"] = topic if topic in _VALID_TOPICS else "Other National Security"
                 batch[idx]["is_event"] = bool(v.get("is_event"))
                 batch[idx]["personal"] = bool(v.get("personal"))
         for e in batch:
@@ -466,8 +493,11 @@ def recent_context(topic: str) -> str:
     if not d:
         return ""
     files = sorted(d.glob("*.md"), reverse=True)
+    # Match under the current name OR any historical one, so a rename doesn't
+    # amputate the trend history sitting in older archives.
+    alt = "|".join(re.escape(n) for n in topic_names(topic))
     pat = re.compile(
-        rf"^#{{2,4}}\s+{re.escape(topic)}\s*$\n(.*?)(?=^#{{1,4}}\s+\S|\Z)",
+        rf"^#{{2,4}}\s+(?:{alt})\s*$\n(.*?)(?=^#{{1,4}}\s+\S|\Z)",
         re.MULTILINE | re.DOTALL,
     )
     slices = []
@@ -581,7 +611,7 @@ def collect_carryover() -> dict[str, list[dict]]:
 
     # Topics may sit at ## (raw brief) or ### (archived copy) — find their level.
     levels = {lv for m in _HEADING_RE.finditer(text)
-              for lv, t in [(len(m.group(1)), m.group(2).strip())] if t in _VALID_TOPICS}
+              for lv, t in [(len(m.group(1)), m.group(2).strip())] if t in _ALL_TOPIC_NAMES}
     if not levels:
         return {}
     tlevel = min(levels)
@@ -608,7 +638,8 @@ def collect_carryover() -> dict[str, list[dict]]:
 
     carry: dict[str, list[dict]] = {}
     for topic, body in _blocks(text, tlevel):
-        if topic.strip() not in _VALID_TOPICS:
+        topic = _CANONICAL_TOPIC.get(topic.strip(), topic)
+        if topic.strip() not in _ALL_TOPIC_NAMES:
             continue
         subs = _blocks(body, tlevel + 1)
         if subs:
@@ -651,7 +682,7 @@ SYNTH_SYSTEM = """You are a senior intelligence analyst writing ONE topic sectio
 You get today's emails on this topic (often several outlets) each labeled with a TAG like [E3], this topic's full archive history for trend context, and — when there's a backlog — ONGOING THREADS: topic write-ups from prior days the reader hasn't reviewed yet. Write a concise, trend-focused synthesis — the throughline of what's developing, not a list of what each email said.
 
 Rules:
-- Lead with the day's throughline; where a recurring pattern warrants it, use `### Subtopic` headings.
+- Lead with the day's throughline as BARE PROSE with no heading above it. NEVER create a `### Overview`, `### Summary`, `### Introduction` or similarly generic opening subsection — the lead paragraph carries no heading at all. Below it, where a recurring pattern warrants it, use `### Subtopic` headings naming the actual subject. There must be exactly ONE lead paragraph in the section.
 - AGGREGATE across sources. When multiple independent outlets converge, say so (real trend). When a claim rests on a SINGLE source, attribute it and don't inflate it. Don't overreact to one datapoint.
 - Use the archive context to note whether a theme is BUILDING, CONTINUING, or FADING — only when the context supports it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days context in link syntax — only today's tagged emails can be linked.
 - ONGOING THREADS — this is the reader's unread backlog on this topic, not just background. The reader wants trends distilled over time, not the same ground re-reported day after day. For each ongoing thread: if today's emails genuinely develop it further, UPDATE it — merge the new development into that thread's throughline under a recognizable `### Subtopic` heading (reuse or closely echo its original title) rather than writing a separate, parallel section that repeats what it already said. If today's emails don't touch it at all, still include it (restate its existing throughline briefly, close to as-written) so it isn't silently dropped before the reader has seen it — do not fabricate new movement for it. Only give a genuinely unrelated development its own new `### Subtopic` with no ongoing-thread counterpart.
@@ -687,7 +718,15 @@ _EXPAND_NOTE = (
 # especially defense technology) is a top standing interest, so it gets a
 # permanent subsection in NatSec and explicit call-outs in the Russia section.
 TOPIC_GUIDANCE = {
-    "National Security & Defense Technology": (
+    "Artificial Intelligence & Other Emerging Technologies": (
+        "\n\nFOCUS — this section is about EMERGING TECHNOLOGY seen through a "
+        "defense and national-security lens: AI, autonomy, biotech, quantum, space, "
+        "microelectronics, advanced manufacturing, EW and cyber capability. Cover a "
+        "technology when it bears on military capability, intelligence, deterrence, "
+        "supply-chain security, or the balance of power between states. A pure "
+        "consumer-product or business story belongs here ONLY when it carries such a "
+        "hook — say what the hook is. Corporate AI news with no security angle is "
+        "not a fit; prefer to leave it out."
         "\n\nSTANDING REQUIREMENT — this section must ALWAYS include a "
         "`### Ukraine Defense Tech` subsection covering Ukrainian defense technology, "
         "military capabilities, procurement, drone/EW/missile innovation, and "
@@ -696,12 +735,30 @@ TOPIC_GUIDANCE = {
         "including sources from Ukraine and any passing but substantive Ukraine "
         "mention in a broader piece. If today's material genuinely has none, still "
         "emit the subsection with one line saying so."),
+    "United States National Security Policy": (
+        "\n\nFOCUS — U.S. national-security POLICY: strategy and doctrine, force "
+        "posture, the defense budget and programs, acquisition and the defense "
+        "industrial base, alliances and force presence, civil-military relations, "
+        "intelligence community matters, nuclear posture, and the leadership and "
+        "personnel decisions that drive them. Technology stories belong in the "
+        "emerging-technology section unless the story is really about POLICY."),
+    "Geopolitics & Geoeconomics": (
+        "\n\nFOCUS — the political economy of statecraft and international "
+        "competition. In scope: economic, fiscal and monetary policy where it bears "
+        "on national power; industrial policy and subsidies; critical minerals and "
+        "supply chains; energy; trade, tariffs and export controls; sanctions and "
+        "economic warfare; investment screening; currency and financial statecraft; "
+        "development finance and infrastructure competition. Treat economics as an "
+        "instrument of state power, not as market news — a pure markets or "
+        "earnings story with no statecraft angle does not belong."),
     "Russia, Ukraine & Eastern Europe": (
         "\n\nSTANDING EMPHASIS — Ukraine is a top interest. Lead with Ukraine when "
         "there is Ukrainian material, and make Ukraine-related developments "
-        "(politics, military capabilities, defense technology, war conduct) explicit "
-        "in your `### Subtopic` headings rather than folding them into general "
-        "Russia coverage."),
+        "(politics, military capabilities, war conduct) explicit in your "
+        "`### Subtopic` headings rather than folding them into general Russia "
+        "coverage. Ukrainian DEFENSE TECHNOLOGY specifically is covered in the "
+        "emerging-technology section — cover the war and the politics here, and "
+        "don't duplicate the technology write-up."),
 }
 
 
@@ -823,6 +880,7 @@ def _link_bare_source_names(md: str, emails: list[dict]) -> str:
 
 
 def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
+                     all_emails: list[dict] | None = None,
                      tagmap: dict[str, str] | None = None,
                      namemap: dict[str, str] | None = None,
                      carried: list[dict] | None = None) -> str:
@@ -848,6 +906,10 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     # In-bucket completeness: any relevant email whose tag never got cited is
     # appended under "### Also noted" so a small item can't vanish silently.
     # Detect the tag in ANY citation form — [desc](E#), bare (E#), or [E#].
+    raw = _strip_generic_headings(raw)
+    # Put citations on any prose the synthesizer left bare BEFORE tags are
+    # substituted for URLs — after substitution the E# tags are gone.
+    raw = repair_citations(topic, raw, all_emails or emails)
     cited = set(re.findall(r"[\[(](E\d+)[\])]", raw))
     # Resolve against ALL fetched email, not just this topic's bucket. Tags are
     # global (E1…En) and the model does sometimes cite an email that routing put
@@ -858,7 +920,7 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     namemap = namemap or {e["tag"]: _sender_name(e["sender"]) for e in emails}
     missing = [e for e in emails if e["tag"] not in cited]
     body = _apply_tags(raw, tagmap, namemap)
-    body = _link_bare_source_names(body, emails)
+    body = _link_bare_source_names(body, all_emails or emails)
     body = _strip_inline_bold(body)
     if missing:
         body += "\n\n### Also noted\n"
@@ -872,6 +934,166 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
         e["_verified"] = True
     return body.strip()
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output hygiene — generic headings, uncited prose, length
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The model invents a generic opening subsection despite the prompt forbidding
+# it, and map-reduce made it worse: each partial produced its own, so the
+# 2026-08-25 brief carried TWO "### Overview" blocks per big section, each
+# paraphrasing the other and each collecting its own Reviewed checkbox.
+_GENERIC_HEADINGS = {
+    "overview", "summary", "introduction", "intro", "key takeaways",
+    "the big picture", "top line", "top-line", "in brief", "at a glance",
+}
+
+
+def _strip_generic_headings(md: str) -> str:
+    """Delete a self-invented generic heading, keeping its prose as the lead."""
+    out = []
+    for line in md.splitlines():
+        m = re.match(r"^#{3,6}\s+(.+?)\s*$", line)
+        if m and m.group(1).strip().rstrip(":").lower() in _GENERIC_HEADINGS:
+            continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+
+
+_TAG_REF_RE = re.compile(r"\(E\d+\)|\[E\d+\]")
+
+
+def _uncited_paragraphs(md: str) -> list[str]:
+    """Prose paragraphs carrying no E-tag at all — headings/lists/quotes excluded."""
+    paras = [b.strip() for b in md.split("\n\n")]
+    return [b for b in paras
+            if b and not b.startswith(("#", "-", "*", ">", "|"))
+            and not _TAG_REF_RE.search(b)]
+
+
+CITE_REPAIR_SYSTEM = """You add missing source citations to an intelligence brief.
+
+You get PARAGRAPHS from a draft that cite no source, and the SOURCE EMAILS they were written from. For each paragraph, insert `[ph](E#)` citations pointing at the email the claim came from — at a clause or sentence boundary, exactly as the rest of the brief does.
+
+Rules:
+- Change NOTHING else. Same paragraphs, same order, same wording. You are only inserting citations.
+- If you cannot identify which email a sentence came from, leave that sentence alone. Never guess a tag.
+- Never write a bare (E#) or [E#], and never write a raw URL. Always `[ph](E#)`.
+- Return the paragraphs separated by a blank line, nothing else — no preamble, no numbering."""
+
+
+def repair_citations(topic: str, md: str, emails: list[dict]) -> str:
+    """Second pass that puts citations on prose the synthesizer left bare.
+
+    Prompting alone has failed repeatedly here — whole runs of paragraphs ship
+    with no link, and a reader can't tell what any of it rests on. This is
+    deterministic in its TRIGGER (we detect the missing tags in code) and only
+    asks the model for the narrow thing it can do: match prose to a source.
+    """
+    missing = _uncited_paragraphs(md)
+    if not missing:
+        return md
+    index = "\n".join(f"[{e['tag']}] {_sender_name(e['sender'])} — {e['subject']}"
+                       for e in emails)
+    try:
+        fixed = complete(
+            system=CITE_REPAIR_SYSTEM,
+            user=(f"TOPIC: {topic}\n\nSOURCE EMAILS:\n{index}\n\n"
+                  f"PARAGRAPHS NEEDING CITATIONS:\n\n" + "\n\n".join(missing)),
+            max_tokens=3000, thinking_level="low",
+            anthropic_model="claude-sonnet-4-6",
+            project="daily_brief", script="daily_brief_v2.py", label="cite-repair",
+        ).strip()
+    except Exception as exc:
+        print(f"  ⚠ citation repair failed for {topic}: {exc}")
+        return md
+    repaired = [b.strip() for b in fixed.split("\n\n") if b.strip()]
+    if len(repaired) != len(missing):
+        # Misaligned output would corrupt the section; drop the repair entirely.
+        print(f"  ⚠ citation repair returned {len(repaired)} of {len(missing)} "
+              f"paragraphs for {topic} — discarded")
+        return md
+    for old, new in zip(missing, repaired):
+        if _TAG_REF_RE.search(new):
+            md = md.replace(old, new, 1)
+    return md
+
+
+# Length control. A "brief" that runs 8,000 words and 24 pages is not one; the
+# reader stops opening it. Sections are compressed toward a total budget, each
+# section's share proportional to its drafted size so a busy topic still gets
+# more room than a quiet one.
+BRIEF_WORD_CAP = 3500
+MIN_SECTION_WORDS = 120
+
+COMPRESS_SYSTEM = """You tighten one section of an intelligence brief to fit a word budget.
+
+ABSOLUTE RULES:
+- PRESERVE EVERY MARKDOWN LINK EXACTLY as written, `[text](target)` — same text, same target. Links are the reader's only route back to the source; losing one is worse than any wordiness. If you drop a development, drop its link with it, but never keep a claim while dropping its link.
+- Keep the `### Subtopic` headings that still carry content. Do NOT emit any `- [ ] Reviewed` line or any other checkbox — those are added later by the assembler, and one you write here becomes a duplicate with no heading above it.
+- Never invent a fact, number, name or date. You may only cut and condense what is there.
+- HIT THE BUDGET. Aim within 10% of it and never come in below 80% of it — under-shooting throws away material the brief had room for. If you are under budget, you cut too much: restore detail.
+- Merge duplicate or near-duplicate passages into one. Cut throat-clearing, hedging and restatement first; cut whole developments last.
+- Keep the specifics (names, numbers, dates) that make a development worth knowing. Compress the prose around them.
+- No markdown bold. Output only the section body — no topic heading, no preamble."""
+
+
+def compress_section(topic: str, body: str, target_words: int,
+                     all_emails: list[dict] | None = None) -> str:
+    try:
+        out = complete(
+            system=COMPRESS_SYSTEM,
+            user=(f"TOPIC: {topic}\nWORD BUDGET: {target_words} words "
+                  f"(currently {len(body.split())}).\n\nSECTION:\n\n{body}"),
+            max_tokens=max(900, int(target_words * 2.2)), thinking_level="low",
+            anthropic_model="claude-sonnet-4-6",
+            project="daily_brief", script="daily_brief_v2.py", label="compress",
+        ).strip()
+    except Exception as exc:
+        print(f"  ⚠ compression failed for {topic}: {exc}")
+        return body
+    # A compressor that ate the citations has failed at the one thing it must
+    # not do — keep the longer original rather than ship link-less prose.
+    before = set(re.findall(r"\]\((https?://|message://)[^)]+\)", body))
+    after = set(re.findall(r"\]\((https?://|message://)[^)]+\)", out))
+    if all_emails:
+        out = _link_bare_source_names(out, all_emails)
+        after = set(re.findall(r"\]\((https?://|message://)[^)]+\)", out))
+    # Tightened from 0.7: at 30% tolerance a compressed section could quietly
+    # shed a third of its citations and still pass.
+    if len(after) < len(before) * 0.9:
+        print(f"  ⚠ compression dropped {len(before) - len(after)} of "
+              f"{len(before)} links in {topic} — keeping uncompressed")
+        return body
+    return out
+
+
+def compress_brief(sections: dict, all_emails: list[dict] | None = None,
+                   cap: int = BRIEF_WORD_CAP) -> dict:
+    """Compress sections toward `cap` total words, proportionally to their size.
+
+    Runs EVERY day, not just on long drafts — carried-forward threads are merged
+    back into each section, so without a standing cap the brief ratchets upward
+    as unreviewed material accumulates.
+    """
+    counts = {k: len(v.split()) for k, v in sections.items()}
+    total = sum(counts.values())
+    if total <= cap:
+        print(f"  brief is {total} words — under the {cap} cap, no compression")
+        return sections
+    print(f"  brief is {total} words — compressing toward {cap}")
+    out = {}
+    for topic, body in sections.items():
+        share = counts[topic] / total
+        target = max(MIN_SECTION_WORDS, int(cap * share))
+        if counts[topic] <= target:
+            out[topic] = body
+            continue
+        out[topic] = compress_section(topic, body, target, all_emails)
+        print(f"    {topic}: {counts[topic]} -> {len(out[topic].split())} words "
+              f"(target {target})")
+    return out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Events extraction
@@ -887,7 +1109,7 @@ Pull an event ONLY if it meets ALL of these:
 3. FUTURE — it takes place ON OR AFTER today's date (given in the user message). Skip any event whose date has already passed.
 
 Return ONLY a JSON array (possibly empty), one object per qualifying event:
-{"tag": "<E# of the source email>", "title": "<event title>", "when": "<date/time as stated>", "where": "<DC-area venue or 'Virtual'>", "topic": "<one of the five areas>"}."""
+{"tag": "<E# of the source email>", "title": "<event title>", "when": "<date/time as stated>", "date_iso": "<YYYY-MM-DD, the date it occurs; resolve 'tomorrow'/'Thursday' against today's date given in the user message>", "where": "<DC-area venue or 'Virtual'>", "topic": "<one of the five areas>"}."""
 
 EVENTS_SCHEMA = {
     "type": "array",
@@ -897,6 +1119,7 @@ EVENTS_SCHEMA = {
             "tag": {"type": "string"},
             "title": {"type": "string"},
             "when": {"type": "string"},
+            "date_iso": {"type": "string"},
             "where": {"type": "string"},
             "topic": {"type": "string"},
         },
@@ -964,6 +1187,45 @@ def extract_events(emails: list[dict]) -> list[dict]:
         except json.JSONDecodeError:
             print(f"  ⚠ events batch @{start} unparseable — skipped")
     return events
+
+
+
+# Events must OUTLIVE the run that found them. They were extracted fresh each
+# day from that day's unread mail, so an event POLITICO announced on Friday for
+# the following Tuesday appeared in Friday's brief and then vanished — by
+# Tuesday its source email was long marked read and out of the window. The store
+# accumulates what we've seen and each brief renders everything still upcoming.
+
+EVENTS_STORE = db.OUTPUT_DIR / "events_store.json"
+
+
+def _load_events() -> list[dict]:
+    try:
+        return json.loads(EVENTS_STORE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def merge_events(found: list[dict]) -> list[dict]:
+    """Fold today's finds into the store, drop what's past, return the upcoming."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    store = _load_events()
+    # Same event re-announced across several issues -> keep one. Title+date is a
+    # good enough key; titles come from the same listings so they're stable.
+    seen = {(e.get("title", "").strip().lower(), e.get("date_iso", "")): e for e in store}
+    for ev in found:
+        seen[(ev.get("title", "").strip().lower(), ev.get("date_iso", ""))] = ev
+    merged = list(seen.values())
+    # Undated events can't be aged out, so keep them only if found this run.
+    upcoming = [e for e in merged
+                if (e.get("date_iso") or "") >= today
+                or (not e.get("date_iso") and e in found)]
+    upcoming.sort(key=lambda e: (e.get("date_iso") or "9999-99-99", e.get("title", "")))
+    try:
+        EVENTS_STORE.write_text(json.dumps(upcoming, indent=1), encoding="utf-8")
+    except Exception as exc:
+        print(f"  ⚠ could not persist events: {exc}")
+    return upcoming
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1099,7 +1361,7 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
         for ev in events:
             link = f" · [details →]({ev['link']})" if ev.get("link") else ""
             topic = f" · _{ev['topic']}_" if ev.get("topic") else ""
-            out.append(f"- **{ev['title']}** — {ev.get('when','?')} · "
+            out.append(f"- **{ev['title']}** — {ev.get('when') or ev.get('date_iso','?')} · "
                        f"{ev.get('where','?')}{topic}{link}")
         out.append("")
     else:
@@ -1258,7 +1520,7 @@ def main(argv=None) -> None:
 
     by_topic: dict[str, list[dict]] = {}
     for e in relevant:
-        by_topic.setdefault(e.get("topic") or "Other", []).append(e)
+        by_topic.setdefault(e.get("topic") or "Other National Security", []).append(e)
 
     # Collected BEFORE synthesis (not after) so each topic's unreviewed backlog
     # can be handed to that topic's OWN synthesis call and merged into one
@@ -1284,7 +1546,9 @@ def main(argv=None) -> None:
             note = f" + {len(carried_items)} ongoing thread(s)" if carried_items else ""
             print(f"  {topic}: {len(bucket)} email(s){note}{' [expanded]' if expanded else ''}")
             sections[topic] = synthesize_topic(topic, bucket, expanded,
-                                               global_tagmap, global_namemap,
+                                               all_emails=emails,
+                                               tagmap=global_tagmap,
+                                               namemap=global_namemap,
                                                carried=carried_items)
             if carried_items:
                 merged_topics.append(topic)
@@ -1299,7 +1563,8 @@ def main(argv=None) -> None:
 
     print("Extracting events…")
     events = extract_events(emails)
-    print(f"  {len(events)} event(s).")
+    events = merge_events(events)
+    print(f"  {len(events)} upcoming event(s) (incl. carried from earlier issues).")
 
     # Safety net (see synthesize_topic's `_verified` flag and assemble_brief's
     # "Flagged" section): only mark read what's actually verifiable in the brief
@@ -1311,6 +1576,9 @@ def main(argv=None) -> None:
     if unverified:
         print(f"  ⚠ {len(unverified)} relevant email(s) not verified in any "
               f"synthesized section — will NOT be marked read.")
+
+    print("Compressing to length…")
+    sections = compress_brief(sections, emails)
 
     brief = assemble_brief(sections, events, non_relevant, personal,
                            len(relevant), len(emails), window_label, carry,
