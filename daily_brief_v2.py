@@ -491,34 +491,23 @@ def _archive_dir() -> Path | None:
     return d if d.exists() else None
 
 
-def recent_context(topic: str) -> str:
-    """Every archived day's coverage of `topic`, oldest first — no day limit and
-    no truncation. Sean wants trend continuity even across a month-long gap, so
-    this deliberately scans the WHOLE archive rather than a fixed recent window;
-    the merge-based carry-forward below (see `collect_carryover`) is what keeps
-    this from growing without bound in practice — once an ongoing thread is
-    folded into a fresh synthesis, later days build on that compact summary
-    rather than re-reading the raw history that produced it."""
-    d = _archive_dir()
-    if not d:
-        return ""
-    files = sorted(d.glob("*.md"), reverse=True)
-    # Match under the current name OR any historical one, so a rename doesn't
-    # amputate the trend history sitting in older archives.
-    alt = "|".join(re.escape(n) for n in topic_names(topic))
-    pat = re.compile(
-        rf"^#{{2,4}}\s+(?:{alt})\s*$\n(.*?)(?=^#{{1,4}}\s+\S|\Z)",
-        re.MULTILINE | re.DOTALL,
-    )
-    slices = []
-    for f in files:
-        try:
-            m = pat.search(f.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if m and m.group(1).strip():
-            slices.append(f"[{f.stem}]\n{m.group(1).strip()}")
-    return "\n\n".join(slices)
+# NOTE: recent_context() lived here and injected EVERY archived day's coverage
+# of a topic into the synthesis prompt. Measured 2026-08-26 it was shipping
+# ~3.5M chars (~888k tokens) per run — 319k tokens for the NatSec call alone —
+# against ~1k tokens of actual instructions. The rules were a 0.3% signal in
+# their own prompt, which is the likeliest explanation for the citation rule,
+# the "### Overview" ban and the no-"today" rule all failing in synthesis while
+# holding fine in the small compressor and repair calls.
+#
+# Trend continuity now comes solely from ONGOING THREADS — the carry-forward of
+# briefs the reader has NOT yet ticked off. That is the horizon Sean actually
+# wants: trends across unread material, not across the entire mail history
+# forever. For a longer retrospective, read the archive in the vault directly.
+#
+# Considered and rejected for now: capping the injection at ~40k chars/topic,
+# newest-first. Bounded, but still ~10k tokens of prose per call competing with
+# the instructions, and Sean's judgement is that a mid-tier model would still rot
+# on it. Revisit only if unread-brief carry-forward proves too short a horizon.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -692,16 +681,16 @@ def collect_carryover() -> dict[str, list[dict]]:
 
 SYNTH_SYSTEM = """You are a senior intelligence analyst writing ONE topic section of a DoD official's daily brief.
 
-You get today's emails on this topic (often several outlets) each labeled with a TAG like [E3], this topic's full archive history for trend context, and — when there's a backlog — ONGOING THREADS: topic write-ups from prior days the reader hasn't reviewed yet. Write a concise, trend-focused synthesis — the throughline of what's developing, not a list of what each email said.
+You get today's emails on this topic (often several outlets) each labeled with a TAG like [E3], and — when there's a backlog — ONGOING THREADS: topic write-ups from prior days the reader has NOT yet reviewed. Write a concise, trend-focused synthesis — the throughline of what's developing, not a list of what each email said.
 
 Rules:
 - Lead with the day's throughline as BARE PROSE with no heading above it. NEVER create a `### Overview`, `### Summary`, `### Introduction` or similarly generic opening subsection — the lead paragraph carries no heading at all. Below it, where a recurring pattern warrants it, use `### Subtopic` headings naming the actual subject. There must be exactly ONE lead paragraph in the section.
 - AGGREGATE across sources. When multiple independent outlets converge, say so (real trend). When a claim rests on a SINGLE source, attribute it and don't inflate it. Don't overreact to one datapoint.
-- Use the archive context to note whether a theme is BUILDING, CONTINUING, or FADING — only when the context supports it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days context in link syntax — only today's tagged emails can be linked.
+- Use the ONGOING THREADS to note whether a theme is BUILDING, CONTINUING, or FADING — only when they support it. Refer to prior days in PLAIN PROSE (e.g. "as reported earlier this week"); do NOT wrap prior-days material in link syntax — only today's tagged emails can be linked.
 - ONGOING THREADS — this is the reader's unread backlog on this topic, not just background. The reader wants trends distilled over time, not the same ground re-reported day after day. For each ongoing thread: if today's emails genuinely develop it further, UPDATE it — merge the new development into that thread's throughline under a recognizable `### Subtopic` heading (reuse or closely echo its original title) rather than writing a separate, parallel section that repeats what it already said. If today's emails don't touch it at all, still include it (restate its existing throughline briefly, close to as-written) so it isn't silently dropped before the reader has seen it — do not fabricate new movement for it. Only give a genuinely unrelated development its own new `### Subtopic` with no ongoing-thread counterpart.
 - NO markdown bold (`**text**`) anywhere in the prose, including on BUILDING/CONTINUING/FADING and other trend words — state the trend in plain text (e.g. "a continuing theme", "is building").
 - CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way — EVERY sentence drawing on that email, including a second or third sentence from the SAME source later in the same paragraph, needs its OWN `[desc](E#)`; never fall back to just typing the outlet's name as bare prose. Don't invent tags. An ongoing thread's OWN prior text may already contain real `[name](url)` links from when it was first written — keep those as-is; they are not tags and don't need re-citing.
-- DATE THE INFORMATION. Never write "today", "yesterday", "this morning" or "currently" — the reader often reads days late, and an ongoing thread may be a week old. Attribute a development to its actual date instead ("On Aug 21…", "In Aug 19 reporting…"), using the date given on each email block and, for an ongoing thread, the date it came from. Relative phrases like "earlier this week" are fine only where the archive context supports them.
+- DATE THE INFORMATION. Never write "today", "yesterday", "this morning" or "currently" — the reader often reads days late, and an ongoing thread may be a week old. Attribute a development to its actual date instead ("On Aug 21…", "In Aug 19 reporting…"), using the date given on each email block and, for an ongoing thread, the date it came from. Relative phrases like "earlier this week" are fine only where an ongoing thread supports them.
 - Be terse. No filler, no restating. If the material is thin, a few sentences is fine.
 - Output GitHub-flavored markdown ONLY. Do NOT emit the topic name as a heading (it's added for you). Start with prose or a `### Subtopic`."""
 
@@ -781,7 +770,7 @@ def _carried_block(item: dict) -> str:
             f"{item['body']}\n")
 
 
-def _synth_call(topic: str, blocks: list[str], context: str,
+def _synth_call(topic: str, blocks: list[str],
                 is_reduce: bool, expanded: bool,
                 carried_blocks: list[str] | None = None) -> str:
     guidance = TOPIC_GUIDANCE.get(topic, "")
@@ -799,8 +788,7 @@ def _synth_call(topic: str, blocks: list[str], context: str,
                 f"{guidance}{_EXPAND_NOTE if expanded else ''}{carried_note}"
                 f"\n\nPARTIALS:\n\n" + "\n\n---\n\n".join(blocks))
     else:
-        user = (f"TOPIC: {topic}\n\nPRIOR COVERAGE (full archive history, context "
-                f"only):\n{context or '(none available)'}"
+        user = (f"TOPIC: {topic}"
                 f"{guidance}{_EXPAND_NOTE if expanded else ''}{carried_note}"
                 f"\n\nEMAILS:\n\n" + "\n\n".join(blocks))
     return complete(
@@ -898,7 +886,6 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
                      tagmap: dict[str, str] | None = None,
                      namemap: dict[str, str] | None = None,
                      carried: list[dict] | None = None) -> str:
-    context = recent_context(topic)
     blocks = [_synth_block(e) for e in emails]
     # Ongoing (unreviewed) threads for this topic — see the ONGOING THREADS rule
     # in SYNTH_SYSTEM. Only handed to the FINAL call (the reduce step when
@@ -909,12 +896,12 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     # Sub-batch (map-reduce) whenever the bucket is large — a natural multi-day
     # catch-up gets the same completeness treatment as an explicit --backlog run.
     if len(blocks) > SYNTH_SUBBATCH:
-        partials = [_synth_call(topic, blocks[s:s + SYNTH_SUBBATCH], context, False, expanded)
+        partials = [_synth_call(topic, blocks[s:s + SYNTH_SUBBATCH], False, expanded)
                     for s in range(0, len(blocks), SYNTH_SUBBATCH)]
-        raw = _synth_call(topic, partials, context, is_reduce=True, expanded=expanded,
+        raw = _synth_call(topic, partials, is_reduce=True, expanded=expanded,
                           carried_blocks=carried_blocks)
     else:
-        raw = _synth_call(topic, blocks, context, is_reduce=False, expanded=expanded,
+        raw = _synth_call(topic, blocks, is_reduce=False, expanded=expanded,
                           carried_blocks=carried_blocks)
 
     # In-bucket completeness: any relevant email whose tag never got cited is
