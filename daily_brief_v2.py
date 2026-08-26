@@ -1129,9 +1129,12 @@ def compress_section(topic: str, body: str, target_words: int,
 
 
 # Share of the word cap reserved for TODAY's material; the remainder goes to
-# unreviewed backlog. Backlog matters — it's why carry-forward exists — but it
-# should never crowd out the day's news.
-FRESH_SHARE = 0.7
+# unreviewed backlog. Set to an even split deliberately: the point of this brief
+# is the TREND that emerges as days accumulate, and over-weighting the newest
+# day adds noise rather than signal — a single day's reporting is the least
+# reliable evidence of a pattern. Backlog carries equal weight so a thread can
+# actually develop across the days the reader hasn't got to yet.
+FRESH_SHARE = 0.5
 
 
 def compress_all(sections: dict, carry: dict, all_emails: list[dict] | None = None,
