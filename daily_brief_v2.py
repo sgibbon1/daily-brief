@@ -83,6 +83,16 @@ def topic_names(topic: str) -> list[str]:
 
 # Every name a topic section may appear under in an archived brief, plus the
 # reverse map that normalises a historical heading back to its current name.
+# Generic opening headings the synthesizer invents despite the prompt forbidding
+# them ("### Overview"), and which older carried-forward blocks still carry.
+# Defined here, above BOTH consumers — collect_carryover() and
+# _strip_generic_headings() — since it is used well before the hygiene section.
+_GENERIC_HEADINGS = {
+    "overview", "summary", "introduction", "intro", "key takeaways",
+    "the big picture", "top line", "top-line", "in brief", "at a glance",
+}
+
+
 _ALL_TOPIC_NAMES = {n for tp in TOPICS_ORDERED for n in topic_names(tp)}
 _CANONICAL_TOPIC = {old: tp for tp in TOPICS_ORDERED for old in TOPIC_ALIASES.get(tp, [])}
 
@@ -653,8 +663,11 @@ def collect_carryover() -> dict[str, list[dict]]:
                 cleaned = _clean(sub_body)
                 if cleaned:
                     # Renormalize to generation levels: this sub becomes a `###`.
+                    _t = sub_title.strip()
+                    if _t.rstrip(":").lower() in _GENERIC_HEADINGS:
+                        _t = "Carried forward"
                     carry.setdefault(topic.strip(), []).append({
-                        "title": sub_title.strip(),
+                        "title": _t,
                         "body": _shift_headings(cleaned, 3 - (tlevel + 1)),
                         "since": since})
         else:
@@ -688,6 +701,7 @@ Rules:
 - ONGOING THREADS — this is the reader's unread backlog on this topic, not just background. The reader wants trends distilled over time, not the same ground re-reported day after day. For each ongoing thread: if today's emails genuinely develop it further, UPDATE it — merge the new development into that thread's throughline under a recognizable `### Subtopic` heading (reuse or closely echo its original title) rather than writing a separate, parallel section that repeats what it already said. If today's emails don't touch it at all, still include it (restate its existing throughline briefly, close to as-written) so it isn't silently dropped before the reader has seen it — do not fabricate new movement for it. Only give a genuinely unrelated development its own new `### Subtopic` with no ongoing-thread counterpart.
 - NO markdown bold (`**text**`) anywhere in the prose, including on BUILDING/CONTINUING/FADING and other trend words — state the trend in plain text (e.g. "a continuing theme", "is building").
 - CITATIONS — cite a development with a markdown link whose target is the email's TAG, placed at a clause or sentence boundary so it still reads naturally once the bracket text is swapped for the outlet's name (we do this substitution automatically — whatever you put in the brackets is discarded). Example: `Nvidia launched a cyberdefense alliance [ph](E17).` NEVER write a bare `(E17)` or `[E17]` on its own, and NEVER write a raw URL. Every email you draw from must be cited this way — EVERY sentence drawing on that email, including a second or third sentence from the SAME source later in the same paragraph, needs its OWN `[desc](E#)`; never fall back to just typing the outlet's name as bare prose. Don't invent tags. An ongoing thread's OWN prior text may already contain real `[name](url)` links from when it was first written — keep those as-is; they are not tags and don't need re-citing.
+- DATE THE INFORMATION. Never write "today", "yesterday", "this morning" or "currently" — the reader often reads days late, and an ongoing thread may be a week old. Attribute a development to its actual date instead ("On Aug 21…", "In Aug 19 reporting…"), using the date given on each email block and, for an ongoing thread, the date it came from. Relative phrases like "earlier this week" are fine only where the archive context supports them.
 - Be terse. No filler, no restating. If the material is thin, a few sentences is fine.
 - Output GitHub-flavored markdown ONLY. Do NOT emit the topic name as a heading (it's added for you). Start with prose or a `### Subtopic`."""
 
@@ -944,10 +958,6 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
 # it, and map-reduce made it worse: each partial produced its own, so the
 # 2026-08-25 brief carried TWO "### Overview" blocks per big section, each
 # paraphrasing the other and each collecting its own Reviewed checkbox.
-_GENERIC_HEADINGS = {
-    "overview", "summary", "introduction", "intro", "key takeaways",
-    "the big picture", "top line", "top-line", "in brief", "at a glance",
-}
 
 
 def _strip_generic_headings(md: str) -> str:
@@ -1024,6 +1034,25 @@ def repair_citations(topic: str, md: str, emails: list[dict]) -> str:
 # reader stops opening it. Sections are compressed toward a total budget, each
 # section's share proportional to its drafted size so a busy topic still gets
 # more room than a quiet one.
+
+# Editorial baseline shares of the brief, taken from the run Sean picked out as
+# the distribution he wants (2026-08-25: 790/897/727/764/279/134 of 3,591 words).
+# Purely proportional-to-drafted allocation let a quiet day collapse a topic to
+# near-nothing — the AI section once shipped 236 words while China took 987, a
+# spread that reflected the compressor's whim rather than the news. Blending a
+# standing editorial weight against the day's actual volume keeps the shape
+# recognisable while still giving a genuinely busy topic more room.
+TOPIC_WEIGHTS = {
+    "Artificial Intelligence & Other Emerging Technologies": 0.220,
+    "United States National Security Policy":                0.250,
+    "China & Indo-Pacific Competition":                      0.202,
+    "Geopolitics & Geoeconomics":                            0.213,
+    "Russia, Ukraine & Eastern Europe":                       0.078,
+    "Other National Security":                               0.037,
+}
+# 0.0 = purely today's volume (the old behaviour), 1.0 = a fixed masthead.
+TOPIC_WEIGHT_BLEND = 0.5
+
 BRIEF_WORD_CAP = 3500
 MIN_SECTION_WORDS = 120
 
@@ -1033,9 +1062,12 @@ ABSOLUTE RULES:
 - PRESERVE EVERY MARKDOWN LINK EXACTLY as written, `[text](target)` — same text, same target. Links are the reader's only route back to the source; losing one is worse than any wordiness. If you drop a development, drop its link with it, but never keep a claim while dropping its link.
 - Keep the `### Subtopic` headings that still carry content. Do NOT emit any `- [ ] Reviewed` line or any other checkbox — those are added later by the assembler, and one you write here becomes a duplicate with no heading above it.
 - Never invent a fact, number, name or date. You may only cut and condense what is there.
+- KEEP every explicit date ("On Aug 21…"). They tell the reader how old a development is, which matters most in exactly the passages you are shortening. Never replace a date with "today" or "recently".
 - HIT THE BUDGET. Aim within 10% of it and never come in below 80% of it — under-shooting throws away material the brief had room for. If you are under budget, you cut too much: restore detail.
 - Merge duplicate or near-duplicate passages into one. Cut throat-clearing, hedging and restatement first; cut whole developments last.
 - Keep the specifics (names, numbers, dates) that make a development worth knowing. Compress the prose around them.
+- Keep any `_Carried forward from ..._` line exactly as written, directly under the heading it belongs to — it tells the reader that block is unreviewed backlog, not today's news.
+- NEVER create a generic heading such as `### Overview`, `### Summary` or `### Key Takeaways`. The lead paragraph carries no heading. Keep only headings that name a real subject.
 - No markdown bold. Output only the section body — no topic heading, no preamble."""
 
 
@@ -1055,18 +1087,94 @@ def compress_section(topic: str, body: str, target_words: int,
         return body
     # A compressor that ate the citations has failed at the one thing it must
     # not do — keep the longer original rather than ship link-less prose.
-    before = set(re.findall(r"\]\((https?://|message://)[^)]+\)", body))
-    after = set(re.findall(r"\]\((https?://|message://)[^)]+\)", out))
+    before = set(re.findall(r"\]\((?:https?://|message://)[^)]+\)", body))
+    after = set(re.findall(r"\]\((?:https?://|message://)[^)]+\)", out))
+    got = len(out.split())
+    if got < target_words * 0.8 or got > target_words * 1.25:
+        try:
+            out = complete(
+                system=COMPRESS_SYSTEM,
+                user=(f"TOPIC: {topic}\nYou produced {got} words; the budget is "
+                      f"{target_words}. Revise to land within 10% of {target_words} — "
+                      f"{'restore detail you cut' if got < target_words else 'cut further'}. "
+                      f"Same rules; preserve every link.\n\nSECTION:\n\n{out}"),
+                max_tokens=max(900, int(target_words * 2.2)), thinking_level="low",
+                anthropic_model="claude-sonnet-4-6",
+                project="daily_brief", script="daily_brief_v2.py", label="compress-retry",
+            ).strip() or out
+        except Exception as exc:
+            print(f"  ⚠ compression retry failed for {topic}: {exc}")
+
+    out = _strip_generic_headings(out)
     if all_emails:
         out = _link_bare_source_names(out, all_emails)
-        after = set(re.findall(r"\]\((https?://|message://)[^)]+\)", out))
-    # Tightened from 0.7: at 30% tolerance a compressed section could quietly
-    # shed a third of its citations and still pass.
-    if len(after) < len(before) * 0.9:
-        print(f"  ⚠ compression dropped {len(before) - len(after)} of "
-              f"{len(before)} links in {topic} — keeping uncompressed")
+        after = set(re.findall(r"\]\((?:https?://|message://)[^)]+\)", out))
+    # Guard on link DENSITY, not absolute count. An absolute threshold is
+    # self-contradictory: compression must drop developments, and the rules say
+    # a dropped development takes its link with it — so cutting 60% of the words
+    # legitimately costs links. At 0.9 absolute the guard refused essentially
+    # every section and the brief shipped at 7,087 words. What actually needs
+    # catching is the failure seen on 2026-08-25: prose kept, citations quietly
+    # stripped ("...planetary warming The Economist."). That shows up as density
+    # collapse, so compare links-per-word before and after.
+    kept_ratio = (len(out.split()) / max(len(body.split()), 1))
+    expected = len(before) * kept_ratio
+    if before and len(after) < expected * 0.75:
+        print(f"  ⚠ compression thinned citations in {topic}: "
+              f"{len(before)}→{len(after)} links while keeping "
+              f"{kept_ratio:.0%} of the words — keeping uncompressed")
         return body
     return out
+
+
+
+# Share of the word cap reserved for TODAY's material; the remainder goes to
+# unreviewed backlog. Backlog matters — it's why carry-forward exists — but it
+# should never crowd out the day's news.
+FRESH_SHARE = 0.7
+
+
+def compress_all(sections: dict, carry: dict, all_emails: list[dict] | None = None,
+                 cap: int = BRIEF_WORD_CAP) -> tuple[dict, dict]:
+    """Compress today's sections and the carried backlog against one budget.
+
+    Carried blocks are compressed BODY-ONLY: their heading, checkbox and
+    "_Carried forward from ..._" line are held out of the call entirely, so no
+    prompt instruction is needed to preserve them and none can be lost.
+    """
+    fresh_words = sum(len(v.split()) for v in sections.values())
+    carry_words = sum(len(i["body"].split()) for items in carry.values() for i in items)
+    if fresh_words + carry_words <= cap:
+        print(f"  brief is {fresh_words + carry_words} words "
+              f"({fresh_words} today + {carry_words} backlog) — under the {cap} cap")
+        return sections, carry
+
+    fresh_cap = cap if not carry_words else int(cap * FRESH_SHARE)
+    carry_cap = cap - fresh_cap
+    print(f"  brief is {fresh_words + carry_words} words "
+          f"({fresh_words} today + {carry_words} backlog) — compressing toward "
+          f"{fresh_cap} + {carry_cap}")
+
+    sections = compress_brief(sections, all_emails, cap=fresh_cap)
+
+    if carry_words > carry_cap:
+        out_carry = {}
+        for topic, items in carry.items():
+            new_items = []
+            for it in items:
+                words = len(it["body"].split())
+                target = max(60, int(carry_cap * words / carry_words))
+                if words <= target:
+                    new_items.append(it)
+                    continue
+                body = compress_section(f"{topic} (unreviewed backlog)",
+                                        it["body"], target, all_emails)
+                new_items.append({**it, "body": body})
+            out_carry[topic] = new_items
+        kept = sum(len(i["body"].split()) for v in out_carry.values() for i in v)
+        print(f"    backlog: {carry_words} -> {kept} words")
+        carry = out_carry
+    return sections, carry
 
 
 def compress_brief(sections: dict, all_emails: list[dict] | None = None,
@@ -1083,9 +1191,23 @@ def compress_brief(sections: dict, all_emails: list[dict] | None = None,
         print(f"  brief is {total} words — under the {cap} cap, no compression")
         return sections
     print(f"  brief is {total} words — compressing toward {cap}")
+
+    # Blend the standing editorial weight with today's drafted share, then
+    # renormalise over the topics actually present (a topic with no content
+    # shouldn't reserve a slice of the budget).
+    present = {k: TOPIC_WEIGHTS.get(k, 1.0 / max(len(sections), 1)) for k in sections}
+    wsum = sum(present.values()) or 1.0
+    blended = {}
+    for topic in sections:
+        drafted_share = counts[topic] / total if total else 0.0
+        editorial_share = present[topic] / wsum
+        blended[topic] = (TOPIC_WEIGHT_BLEND * editorial_share
+                          + (1 - TOPIC_WEIGHT_BLEND) * drafted_share)
+    bsum = sum(blended.values()) or 1.0
+
     out = {}
     for topic, body in sections.items():
-        share = counts[topic] / total
+        share = blended[topic] / bsum
         target = max(MIN_SECTION_WORDS, int(cap * share))
         if counts[topic] <= target:
             out[topic] = body
@@ -1315,11 +1437,14 @@ def _render_carried(items: list[dict]) -> list[str]:
             pretty = datetime.strptime(since, "%Y-%m-%d").strftime("%b %-d")
         except ValueError:
             pretty = since
-        out += [f"### {it['title']}",
+        title = it["title"]
+        if title.rstrip(":").lower() in _GENERIC_HEADINGS:
+            title = "Carried forward"
+        out += [f"### {title}",
                 "- [ ] Reviewed",
                 "",
                 f"_Carried forward from {since} ({pretty}) — not yet reviewed._",
-                "", it["body"], ""]
+                "", _strip_generic_headings(it["body"]), ""]
     return out
 
 
@@ -1348,6 +1473,10 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
         if body:
             # Checkboxes live on the SUBSECTIONS when a section has any; only a
             # section with no `###` subsections carries its own checkbox.
+            # Last line of defence against a self-invented "### Overview":
+            # assembly is the one point every path converges — fresh synthesis,
+            # carried blocks, and sections whose compression was skipped.
+            body = _strip_generic_headings(body)
             boxed, has_subs = _checkbox_body(body)
             if not has_subs:
                 out += ["- [ ] Reviewed", ""]
@@ -1578,7 +1707,12 @@ def main(argv=None) -> None:
               f"synthesized section — will NOT be marked read.")
 
     print("Compressing to length…")
-    sections = compress_brief(sections, emails)
+    # Fresh and carried are compressed SEPARATELY. Folding carried blocks into
+    # the section body put them through a rewrite that stripped their headings
+    # and their "_Carried forward from ..._" markers, so unreviewed backlog read
+    # as today's reporting. Compressing each block's body on its own keeps that
+    # scaffolding structurally intact — the compressor never sees it.
+    sections, carry = compress_all(sections, carry, emails)
 
     brief = assemble_brief(sections, events, non_relevant, personal,
                            len(relevant), len(emails), window_label, carry,
