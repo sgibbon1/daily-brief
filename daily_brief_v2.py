@@ -1139,8 +1139,12 @@ def compress_all(sections: dict, carry: dict, all_emails: list[dict] | None = No
               f"({fresh_words} today + {carry_words} backlog) — under the {cap} cap")
         return sections, carry
 
-    fresh_cap = cap if not carry_words else int(cap * FRESH_SHARE)
-    carry_cap = cap - fresh_cap
+    # Give the backlog only what it can actually use and hand the remainder back
+    # to today's material. A flat 50/50 reserved 1,750 words for a 236-word
+    # backlog on 2026-08-26 and simply wasted 1,514 of them — the brief came in
+    # at 2,147 words against a 3,500 cap and read thin.
+    carry_cap = min(carry_words, int(cap * (1 - FRESH_SHARE)))
+    fresh_cap = cap - carry_cap
     print(f"  brief is {fresh_words + carry_words} words "
           f"({fresh_words} today + {carry_words} backlog) — compressing toward "
           f"{fresh_cap} + {carry_cap}")
@@ -1344,7 +1348,25 @@ def merge_events(found: list[dict]) -> list[dict]:
 # Assemble
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _checkbox_body(body: str) -> tuple[str, bool]:
+
+def _review_box(label: str, seen: set) -> str:
+    """A `Reviewed` checkbox whose text is UNIQUE within the note.
+
+    Obsidian's Tasks plugin matches a task by its line text, so N identical
+    "- [ ] Reviewed" lines are ambiguous and it refuses to toggle them on
+    mobile. Naming each box after its section both disambiguates and reads
+    better; a numeric suffix covers the rare repeated heading.
+    """
+    base = re.sub(r"\s+", " ", label).strip() or "Section"
+    name, n = base, 2
+    while name.lower() in seen:
+        name, n = f"{base} ({n})", n + 1
+    seen.add(name.lower())
+    return f"- [ ] Reviewed — {name}"
+
+
+def _checkbox_body(body: str, seen: set | None = None,
+                   topic: str = "") -> tuple[str, bool]:
     """Put a `- [ ] Reviewed` box under each `###` subsection heading.
 
     Returns (body, had_subsections). When a section HAS subsections the boxes go
@@ -1366,6 +1388,7 @@ def _checkbox_body(body: str) -> tuple[str, bool]:
     box) so every paragraph in the section is trackable, not just the ones
     the model happened to put a subheading on.
     """
+    seen = set() if seen is None else seen
     lines = body.splitlines()
     has_subsections = any(re.match(r"^###\s+\S", l) for l in lines)
     out: list[str] = []
@@ -1374,11 +1397,12 @@ def _checkbox_body(body: str) -> tuple[str, bool]:
     while i < len(lines):
         line = lines[i]
         if i == 0 and has_subsections and not re.match(r"^###\s+\S", line):
-            out += ["### Overview", "- [ ] Reviewed", ""]
+            out += ["### Overview", _review_box(f"{topic} overview", seen), ""]
         out.append(line)
-        if re.match(r"^###\s+\S", line):
+        m = re.match(r"^###\s+(\S.*?)\s*$", line)
+        if m:
             found = True
-            out += ["- [ ] Reviewed", ""]
+            out += [_review_box(m.group(1), seen), ""]
             while i + 1 < len(lines) and not lines[i + 1].strip():
                 i += 1
         i += 1
@@ -1417,7 +1441,7 @@ def _find_orphan_checkboxes(brief: str) -> list[str]:
     return orphans
 
 
-def _render_carried(items: list[dict]) -> list[str]:
+def _render_carried(items: list[dict], seen: set | None = None) -> list[str]:
     """Re-emit unreviewed blocks from the last brief, each keeping its own box and
     its ORIGINAL date so the age cap survives repeated carrying."""
     out: list[str] = []
@@ -1431,7 +1455,7 @@ def _render_carried(items: list[dict]) -> list[str]:
         if title.rstrip(":").lower() in _GENERIC_HEADINGS:
             title = "Carried forward"
         out += [f"### {title}",
-                "- [ ] Reviewed",
+                _review_box(title, seen),
                 "",
                 f"_Carried forward from {since} ({pretty}) — not yet reviewed._",
                 "", _strip_generic_headings(it["body"]), ""]
@@ -1447,6 +1471,7 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
                    read_before: list[dict] | None = None) -> str:
     now = datetime.now()
     carry = carry or {}
+    seen_boxes: set = set()   # keeps every Reviewed box's text unique (Tasks plugin)
     out = [
         title or f"# Daily Intelligence Brief — {now.strftime('%B %d, %Y')}", "",
         f"*Generated {now.strftime('%H:%M')} | {n_relevant} relevant of {n_total} "
@@ -1456,7 +1481,7 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
         body = sections.get(topic)
         carried = carry.get(topic, [])
         if not body and not carried:
-            out += [f"## {topic}", "- [ ] Reviewed", "",
+            out += [f"## {topic}", _review_box(topic, seen_boxes), "",
                     "_No significant developments._", ""]
             continue
         out += [f"## {topic}"]
@@ -1467,15 +1492,16 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
             # assembly is the one point every path converges — fresh synthesis,
             # carried blocks, and sections whose compression was skipped.
             body = _strip_generic_headings(body)
-            boxed, has_subs = _checkbox_body(body)
+            boxed, has_subs = _checkbox_body(body, seen_boxes, topic)
             if not has_subs:
-                out += ["- [ ] Reviewed", ""]
+                out += [_review_box(topic, seen_boxes), ""]
             out += [boxed, ""]
         elif carried:
             out += ["_No new developments today; unreviewed items below._", ""]
-        out += _render_carried(carried)
+        out += _render_carried(carried, seen_boxes)
 
-    out += ["## Upcoming Events (DC Metro & Virtual)", "- [ ] Reviewed", ""]
+    out += ["## Upcoming Events (DC Metro & Virtual)",
+            _review_box("Upcoming Events", seen_boxes), ""]
     if events:
         for ev in events:
             link = f" · [details →]({ev['link']})" if ev.get("link") else ""
