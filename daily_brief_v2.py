@@ -842,6 +842,20 @@ def _apply_tags(md: str, tagmap: dict[str, str], namemap: dict[str, str]) -> str
     return re.sub(r"[ ]{2,}", " ", md)  # tidy any double spaces left by a drop
 
 
+
+def _repair_link_syntax(md: str) -> str:
+    """Fix links the model mangled: `[text](url]` -> `[text](url)`.
+
+    Compression rewrites whole sentences and now and then closes a link with
+    the wrong bracket. Obsidian then renders the whole thing as literal text,
+    so a single stray character silently costs a citation.
+    """
+    md = re.sub(r"\]\(((?:https?|message)://[^)\]\s]+)\]", r"](\1)", md)
+    # An unterminated link running into whitespace or end-of-line.
+    md = re.sub(r"\]\(((?:https?|message)://[^)\s]+)(?=\s|$)", r"](\1)", md)
+    return md
+
+
 def _link_bare_source_names(md: str, emails: list[dict]) -> str:
     """Safety net for SYNTH_SYSTEM's citation rule. The model reliably brackets
     the FIRST reference to a source in a paragraph but sometimes drops the
@@ -866,11 +880,27 @@ def _link_bare_source_names(md: str, emails: list[dict]) -> str:
     case in a sentence — silently failed to link. `(?<!\\w)`/`(?!\\w)` check
     only one side each and don't have that blind spot.
     """
+    # Outlets are referred to by a SHORTER form than their sender display name
+    # ("The Economist Today" -> "The Economist"), so register trimmed variants
+    # alongside the full name. Trimming stops at generic trailing words only,
+    # and a variant must stay long enough to be distinctive.
+    _TRAILING = {"today", "daily", "newsletter", "brief", "briefing", "digest",
+                 "weekly", "news", "report", "edition"}
     name_to_link: dict[str, str] = {}
     for e in emails:
         name = _sender_name(e["sender"])
-        if name:
-            name_to_link.setdefault(name, e["link"])
+        if not name:
+            continue
+        name_to_link.setdefault(name, e["link"])
+        parts = name.split()
+        for _ in range(2):
+            if len(parts) > 1 and parts[-1].strip(".,").lower() in _TRAILING:
+                parts = parts[:-1]
+                cand = " ".join(parts)
+                if len(cand) >= 5 and any(ch.isupper() for ch in cand):
+                    name_to_link.setdefault(cand, e["link"])
+            else:
+                break
     for name in sorted(name_to_link, key=len, reverse=True):
         link = name_to_link[name]
         # Skip a match already wrapped as `[Name](url)` — preceded by `[` or
@@ -922,6 +952,7 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     missing = [e for e in emails if e["tag"] not in cited]
     body = _apply_tags(raw, tagmap, namemap)
     body = _link_bare_source_names(body, all_emails or emails)
+    body = _repair_link_syntax(body)
     body = _strip_inline_bold(body)
     if missing:
         body += "\n\n### Also noted\n"
@@ -1040,13 +1071,26 @@ TOPIC_WEIGHTS = {
 # 0.0 = purely today's volume (the old behaviour), 1.0 = a fixed masthead.
 TOPIC_WEIGHT_BLEND = 0.5
 
-BRIEF_WORD_CAP = 3500
+# Budget for section PROSE, before assembly. Sean's target is ~3,500 words in
+# the finished brief, but two things sit between this number and that one:
+# assembly adds ~250 words of headings and Reviewed checkboxes, and the
+# compressor lands ~15% over whatever budget it is given. Measured 2026-08-26:
+# a 3,500 cap shipped 4,424 readable words. 2,800 is set to land near 3,500.
+# Collapsed sections (Coverage, Upcoming Events) are outside this budget — they
+# are a reference list, not reading. Re-measure before changing.
+BRIEF_WORD_CAP = 2800
 MIN_SECTION_WORDS = 120
+# Calibration dial for the compressor's bias against its stated budget.
+# Was 1.4 while the model systematically UNDER-shot (54% of target). Masking the
+# links changed that entirely: it now preserves rather than cuts, landing ~110%
+# of whatever it is asked for, so inflating the ask compounded the overshoot.
+# Back to 1.0 — ask for the real number. Re-measure before changing again.
+COMPRESS_TARGET_BOOST = 1.0
 
 COMPRESS_SYSTEM = """You tighten one section of an intelligence brief to fit a word budget.
 
 ABSOLUTE RULES:
-- PRESERVE EVERY MARKDOWN LINK EXACTLY as written, `[text](target)` — same text, same target. Links are the reader's only route back to the source; losing one is worse than any wordiness. If you drop a development, drop its link with it, but never keep a claim while dropping its link.
+- Citations appear as `[text]⟦L7⟧`. Keep each ⟦L#⟧ marker EXACTLY as written and immediately after its bracketed text. Never alter, renumber or invent a marker. If you drop a development, drop its marker with it; never keep a claim while dropping its marker. Links are the reader's only route back to the source; losing one is worse than any wordiness. If you drop a development, drop its link with it, but never keep a claim while dropping its link.
 - Keep the `### Subtopic` headings that still carry content. Do NOT emit any `- [ ] Reviewed` line or any other checkbox — those are added later by the assembler, and one you write here becomes a duplicate with no heading above it.
 - Never invent a fact, number, name or date. You may only cut and condense what is there.
 - KEEP every explicit date ("On Aug 21…"). They tell the reader how old a development is, which matters most in exactly the passages you are shortening. Never replace a date with "today" or "recently".
@@ -1058,13 +1102,40 @@ ABSOLUTE RULES:
 - No markdown bold. Output only the section body — no topic heading, no preamble."""
 
 
+
+# Links are long, opaque `message://%3C...%3E` URLs. Asking a model to reproduce
+# them verbatim while rewriting prose does not work — the 2026-08-26 run kept 89%
+# of a section's words but 1 of its 12 links. So the model never sees a URL
+# during compression: each link becomes a short opaque token it can move or drop
+# as a unit, and the real URLs are restored afterwards. A dropped development
+# takes its token with it, which is correct; a mangled URL becomes impossible.
+_LINK_TOKEN_RE = re.compile(r"\[([^\]]+)\]\(((?:https?|message)://[^)]+)\)")
+
+
+def _mask_links(md: str) -> tuple[str, dict]:
+    store: dict[str, tuple[str, str]] = {}
+    def sub(m):
+        key = f"⟦L{len(store)}⟧"
+        store[key] = (m.group(1), m.group(2))
+        return f"[{m.group(1)}]{key}"
+    return _LINK_TOKEN_RE.sub(sub, md), store
+
+
+def _unmask_links(md: str, store: dict) -> str:
+    for key, (text, url) in store.items():
+        md = md.replace(f"[{text}]{key}", f"[{text}]({url})")
+        md = md.replace(key, f"({url})")      # token survived without its text
+    return re.sub(r"⟦L\d+⟧", "", md)          # any token we cannot pair: drop it
+
+
 def compress_section(topic: str, body: str, target_words: int,
                      all_emails: list[dict] | None = None) -> str:
+    masked, link_store = _mask_links(body)
     try:
         out = complete(
             system=COMPRESS_SYSTEM,
             user=(f"TOPIC: {topic}\nWORD BUDGET: {target_words} words "
-                  f"(currently {len(body.split())}).\n\nSECTION:\n\n{body}"),
+                  f"(currently {len(body.split())}).\n\nSECTION:\n\n{masked}"),
             max_tokens=max(900, int(target_words * 2.2)), thinking_level="low",
             anthropic_model="claude-sonnet-4-6",
             project="daily_brief", script="daily_brief_v2.py", label="compress",
@@ -1077,14 +1148,15 @@ def compress_section(topic: str, body: str, target_words: int,
     before = set(re.findall(r"\]\((?:https?://|message://)[^)]+\)", body))
     after = set(re.findall(r"\]\((?:https?://|message://)[^)]+\)", out))
     got = len(out.split())
-    if got < target_words * 0.8 or got > target_words * 1.25:
+    if got < target_words * 0.8 or got > target_words * 1.12:
         try:
             out = complete(
                 system=COMPRESS_SYSTEM,
                 user=(f"TOPIC: {topic}\nYou produced {got} words; the budget is "
                       f"{target_words}. Revise to land within 10% of {target_words} — "
                       f"{'restore detail you cut' if got < target_words else 'cut further'}. "
-                      f"Same rules; preserve every link.\n\nSECTION:\n\n{out}"),
+                      f"Same rules; keep every ⟦L#⟧ marker attached to its "
+                      f"bracketed text.\n\nSECTION:\n\n{out}"),
                 max_tokens=max(900, int(target_words * 2.2)), thinking_level="low",
                 anthropic_model="claude-sonnet-4-6",
                 project="daily_brief", script="daily_brief_v2.py", label="compress-retry",
@@ -1092,9 +1164,11 @@ def compress_section(topic: str, body: str, target_words: int,
         except Exception as exc:
             print(f"  ⚠ compression retry failed for {topic}: {exc}")
 
+    out = _unmask_links(out, link_store)
     out = _strip_generic_headings(out)
     if all_emails:
         out = _link_bare_source_names(out, all_emails)
+        out = _repair_link_syntax(out)
         after = set(re.findall(r"\]\((?:https?://|message://)[^)]+\)", out))
     # Guard on link DENSITY, not absolute count. An absolute threshold is
     # self-contradictory: compression must drop developments, and the rules say
@@ -1206,7 +1280,9 @@ def compress_brief(sections: dict, all_emails: list[dict] | None = None,
         if counts[topic] <= target:
             out[topic] = body
             continue
-        out[topic] = compress_section(topic, body, target, all_emails)
+        out[topic] = compress_section(topic, body,
+                                      min(counts[topic], int(target * COMPRESS_TARGET_BOOST)),
+                                      all_emails)
         print(f"    {topic}: {counts[topic]} -> {len(out[topic].split())} words "
               f"(target {target})")
     return out
