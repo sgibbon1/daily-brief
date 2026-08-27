@@ -531,7 +531,12 @@ def _archive_dir() -> Path | None:
 #     merge step).
 
 _CARRY_LINE_RE = re.compile(r"^_Carried forward from ([0-9]{4}-[0-9]{2}-[0-9]{2})\b.*_$", re.M)
-_REVIEWED_BOX_RE = re.compile(r"^- \[([ xX])\]\s*Reviewed\s*$", re.M)
+# NB the trailing `.*`: boxes are labelled ("- [ ] Reviewed — Ukraine Defense
+# Tech") so the section name can make each line unique for Obsidian's Tasks
+# plugin. Anchoring `\s*$` straight after "Reviewed" silently matched nothing
+# and killed carry-forward.
+_REVIEWED_BOX_RE = re.compile(r"^- \[([ xX])\]\s*Reviewed\b.*$", re.M)
+_FLAG_BOX_RE = re.compile(r"^- \[[ xX]\]\s*Flag\b.*$", re.M)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*$", re.M)
 
 
@@ -621,6 +626,7 @@ def collect_carryover() -> dict[str, list[dict]]:
 
     def _clean(body: str) -> str:
         body = _REVIEWED_BOX_RE.sub("", body)
+        body = _FLAG_BOX_RE.sub("", body)
         body = _CARRY_LINE_RE.sub("", body)
         # A standalone "---" is a VAULT-rendering artifact — insert_into_today's
         # _add_subsection_dividers (daily_brief.py) bakes one into the Today.md
@@ -1425,7 +1431,7 @@ def merge_events(found: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _review_box(label: str, seen: set) -> str:
+def _review_box_name(label: str, seen: set) -> str:
     """A `Reviewed` checkbox whose text is UNIQUE within the note.
 
     Obsidian's Tasks plugin matches a task by its line text, so N identical
@@ -1438,7 +1444,18 @@ def _review_box(label: str, seen: set) -> str:
     while name.lower() in seen:
         name, n = f"{base} ({n})", n + 1
     seen.add(name.lower())
-    return f"- [ ] Reviewed — {name}"
+    return name
+
+
+def _tracker_boxes(label: str, seen: set) -> list[str]:
+    """The pair of trackers under a heading: Reviewed, and Flag for re-reading.
+
+    Both carry the section name so every task line in the note is unique —
+    Obsidian's Tasks plugin matches a task by its text and refuses to toggle
+    ambiguous duplicates.
+    """
+    name = _review_box_name(label, seen)
+    return [f"- [ ] Reviewed — {name}", f"- [ ] Flag — {name}"]
 
 
 def _checkbox_body(body: str, seen: set | None = None,
@@ -1473,12 +1490,12 @@ def _checkbox_body(body: str, seen: set | None = None,
     while i < len(lines):
         line = lines[i]
         if i == 0 and has_subsections and not re.match(r"^###\s+\S", line):
-            out += ["### Overview", _review_box(f"{topic} overview", seen), ""]
+            out += ["### Overview", *_tracker_boxes(f"{topic} overview", seen), ""]
         out.append(line)
         m = re.match(r"^###\s+(\S.*?)\s*$", line)
         if m:
             found = True
-            out += [_review_box(m.group(1), seen), ""]
+            out += [*_tracker_boxes(m.group(1), seen), ""]
             while i + 1 < len(lines) and not lines[i + 1].strip():
                 i += 1
         i += 1
@@ -1506,7 +1523,7 @@ def _find_orphan_checkboxes(brief: str) -> list[str]:
     lines = brief.splitlines()
     orphans = []
     for i, line in enumerate(lines):
-        if not re.match(r"^- \[[ xX]\] Reviewed\s*$", line):
+        if not re.match(r"^- \[[ xX]\] Reviewed\b", line):
             continue
         j = i - 1
         while j >= 0 and not lines[j].strip():
@@ -1531,7 +1548,7 @@ def _render_carried(items: list[dict], seen: set | None = None) -> list[str]:
         if title.rstrip(":").lower() in _GENERIC_HEADINGS:
             title = "Carried forward"
         out += [f"### {title}",
-                _review_box(title, seen),
+                *_tracker_boxes(title, seen),
                 "",
                 f"_Carried forward from {since} ({pretty}) — not yet reviewed._",
                 "", _strip_generic_headings(it["body"]), ""]
@@ -1557,7 +1574,7 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
         body = sections.get(topic)
         carried = carry.get(topic, [])
         if not body and not carried:
-            out += [f"## {topic}", _review_box(topic, seen_boxes), "",
+            out += [f"## {topic}", *_tracker_boxes(topic, seen_boxes), "",
                     "_No significant developments._", ""]
             continue
         out += [f"## {topic}"]
@@ -1570,14 +1587,14 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
             body = _strip_generic_headings(body)
             boxed, has_subs = _checkbox_body(body, seen_boxes, topic)
             if not has_subs:
-                out += [_review_box(topic, seen_boxes), ""]
+                out += [*_tracker_boxes(topic, seen_boxes), ""]
             out += [boxed, ""]
         elif carried:
             out += ["_No new developments today; unreviewed items below._", ""]
         out += _render_carried(carried, seen_boxes)
 
     out += ["## Upcoming Events (DC Metro & Virtual)",
-            _review_box("Upcoming Events", seen_boxes), ""]
+            *_tracker_boxes("Upcoming Events", seen_boxes), ""]
     if events:
         for ev in events:
             link = f" · [details →]({ev['link']})" if ev.get("link") else ""
