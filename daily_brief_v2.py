@@ -937,6 +937,17 @@ def _link_bare_source_names(md: str, emails: list[dict],
         name_to_link.setdefault(name, link)
     for name in sorted(name_to_link, key=len, reverse=True):
         link = name_to_link[name]
+        # Naked bracket: "[Name]" with no "(url)" at all -- confirmed
+        # 2026-08-30, an entire multi-day-old backlog's citations in the
+        # Geopolitics & Geoeconomics section had every "[Name](url)" reduced to
+        # a bare "[Name]" by repeated compression, most likely the model
+        # keeping the bracket wrapper it recognizes as citation style while
+        # dropping the masked ⟦L#⟧ token that would have restored the URL on
+        # unmask. Must run BEFORE the bare-name pass below, which explicitly
+        # skips anything preceded by "[" on the assumption it's already a
+        # working link — that assumption is exactly what's false here.
+        naked_bracket = re.compile(r"\[" + re.escape(name) + r"\](?!\()")
+        md = naked_bracket.sub(lambda m, name=name, link=link: f"[{name}]({link})", md)
         # Skip a match already wrapped as `[Name](url)` — preceded by `[` or
         # immediately followed by `](`.
         pattern = re.compile(
