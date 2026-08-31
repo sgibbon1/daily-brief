@@ -862,7 +862,24 @@ def _repair_link_syntax(md: str) -> str:
     return md
 
 
-def _link_bare_source_names(md: str, emails: list[dict]) -> str:
+def _extract_named_links(md: str) -> dict[str, str]:
+    """name -> url for every already-resolved `[Name](url)` link already sitting
+    in `md`. An ongoing thread's own prior text (see `_carried_block`) carries
+    real links from when it was first synthesized, for names that may not have
+    emailed again today — this is what lets `_link_bare_source_names` recover a
+    citation the model drops the brackets from while merging/paraphrasing that
+    prior text into a fresh section, something it has NO other way to know
+    about, since a carried source's name never appears in the current day's
+    `emails` list at all.
+    """
+    out: dict[str, str] = {}
+    for m in re.finditer(r"\[([^\]]+)\]\(((?:https?|message)://[^)]+)\)", md):
+        out.setdefault(m.group(1), m.group(2))
+    return out
+
+
+def _link_bare_source_names(md: str, emails: list[dict],
+                            extra_links: dict[str, str] | None = None) -> str:
     """Safety net for SYNTH_SYSTEM's citation rule. The model reliably brackets
     the FIRST reference to a source in a paragraph but sometimes drops the
     bracket on a later sentence citing the same email, leaving the bare sender
@@ -875,6 +892,15 @@ def _link_bare_source_names(md: str, emails: list[dict]) -> str:
     display name — no LLM call, so no room for a repeat of the drop.
     Longest names first so a short name can't half-match inside a longer one
     sharing a prefix (e.g. "FP's James Palmer" vs a hypothetical "FP").
+
+    `extra_links` (from `_extract_named_links`) covers the SAME failure mode
+    for a source that isn't in today's `emails` at all — a carried-forward
+    ongoing thread whose own prior text already named and linked a source that
+    didn't email again today. Without this, the confirmed 2026-08-28→08-30
+    Russia-section failure recurs: "The Moscow Times, Kyiv Post" and "RIDDLE"
+    arrived here as bare names with no entry in `emails` to recover a link
+    from, so the tag-based repair pass had nothing to work with either.
+    `emails`-derived links take priority (`setdefault` below only fills gaps).
 
     Many sender display names are themselves "X from Y" author+publication
     citations (Substack's convention, e.g. "Al Mauroni from Nuclear Weapons
@@ -907,6 +933,8 @@ def _link_bare_source_names(md: str, emails: list[dict]) -> str:
                     name_to_link.setdefault(cand, e["link"])
             else:
                 break
+    for name, link in (extra_links or {}).items():
+        name_to_link.setdefault(name, link)
     for name in sorted(name_to_link, key=len, reverse=True):
         link = name_to_link[name]
         # Skip a match already wrapped as `[Name](url)` — preceded by `[` or
@@ -957,7 +985,13 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     namemap = namemap or {e["tag"]: _sender_name(e["sender"]) for e in emails}
     missing = [e for e in emails if e["tag"] not in cited]
     body = _apply_tags(raw, tagmap, namemap)
-    body = _link_bare_source_names(body, all_emails or emails)
+    # Sources embedded in ongoing threads (see _extract_named_links) may not be
+    # in today's `emails` at all — without this, a merge that drops a carried
+    # source's brackets has no link to recover.
+    extra_links: dict[str, str] = {}
+    for it in carried or []:
+        extra_links.update(_extract_named_links(it["body"]))
+    body = _link_bare_source_names(body, all_emails or emails, extra_links)
     body = _repair_link_syntax(body)
     body = _strip_inline_bold(body)
     if missing:
@@ -1173,7 +1207,12 @@ def compress_section(topic: str, body: str, target_words: int,
     out = _unmask_links(out, link_store)
     out = _strip_generic_headings(out)
     if all_emails:
-        out = _link_bare_source_names(out, all_emails)
+        # A masked link's token can survive compression detached from its own
+        # bracketed text (the model re-mentions the source elsewhere in its
+        # own new phrasing) — extra_links, sourced from the PRE-compression
+        # body, recovers that name the same way synthesize_topic() recovers a
+        # carried source's dropped brackets.
+        out = _link_bare_source_names(out, all_emails, _extract_named_links(body))
         out = _repair_link_syntax(out)
         after = set(re.findall(r"\]\((?:https?://|message://)[^)]+\)", out))
     # Guard on link DENSITY, not absolute count. An absolute threshold is
