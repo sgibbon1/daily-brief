@@ -703,6 +703,96 @@ def collect_carryover() -> dict[str, list[dict]]:
     return carry
 
 
+def _section_prose(body: str) -> str:
+    """A subsection's body with its checkbox/flag/carry-line/divider scaffolding
+    stripped, for comparing content across runs regardless of that scaffolding."""
+    body = _REVIEWED_BOX_RE.sub("", body)
+    body = _FLAG_BOX_RE.sub("", body)
+    body = _CARRY_LINE_RE.sub("", body)
+    body = re.sub(r"^---[ \t]*$\n?", "", body, flags=re.MULTILINE)
+    return re.sub(r"\n{2,}", "\n", body).strip()
+
+
+def _index_reviewed_sections(text: str) -> dict[tuple[str, str], tuple[str, str | None]]:
+    """(topic, subsection title) -> (prose, its checked Reviewed-box line, or
+    None if unchecked/absent). Scoped by (topic, title) for the same reason
+    _already_reviewed_today() is: "Overview" and "Also noted" repeat across
+    every topic, so bare-title matching would carry the WRONG topic's
+    checked state onto this one."""
+    out: dict[tuple[str, str], tuple[str, str | None]] = {}
+    levels = {lv for m in _HEADING_RE.finditer(text)
+              for lv, t in [(len(m.group(1)), m.group(2).strip())] if t in _ALL_TOPIC_NAMES}
+    if not levels:
+        return out
+    tlevel = min(levels)
+    for topic, body in _blocks(text, tlevel):
+        topic = _CANONICAL_TOPIC.get(topic.strip(), topic.strip())
+        if topic not in _ALL_TOPIC_NAMES:
+            continue
+        subs = _blocks(body, tlevel + 1)
+        for title, sub_body in (subs if subs else [(topic, body)]):
+            box = _REVIEWED_BOX_RE.search(sub_body)
+            checked_line = box.group(0) if (box and box.group(1).lower() == "x") else None
+            out[(topic, title.strip())] = (_section_prose(sub_body), checked_line)
+    return out
+
+
+def preserve_reviewed_state(brief_md: str) -> str:
+    """Carry forward a subsection's checked Reviewed box (with its original
+    completion stamp) onto the fresh brief about to replace it in Today.md,
+    wherever that subsection's own prose is byte-identical to what's already
+    there. Without this, insert_into_today() unconditionally replaces the
+    WHOLE Daily Intelligence Brief section every run -- assemble_brief()'s
+    boxes always start unchecked (_tracker_boxes never looks at prior
+    state) -- so ANY re-run (a same-day rescan, a manual re-run) resets
+    every checkbox regardless of whether that section's content actually
+    changed, forcing the reader to re-review news they've already seen.
+    Reset stays the default for anything whose text differs at all -- that
+    disagreement is the whole reason the checkbox exists.
+    """
+    if not db.VAULT_TODAY_PATH:
+        return brief_md
+    try:
+        today_text = Path(db.VAULT_TODAY_PATH).read_text(encoding="utf-8")
+    except Exception:
+        return brief_md
+    m = re.search(r"\n---\n\n## Daily Intelligence Brief\n\n(.*?)(?=\n## |\Z)",
+                 today_text, re.DOTALL)
+    if not m:
+        return brief_md
+    old_index = _index_reviewed_sections(_shift_headings(m.group(1), -1))
+    if not old_index:
+        return brief_md
+
+    new_levels = {lv for mm in _HEADING_RE.finditer(brief_md)
+                  for lv, t in [(len(mm.group(1)), mm.group(2).strip())] if t in _ALL_TOPIC_NAMES}
+    if not new_levels:
+        return brief_md
+    new_tlevel = min(new_levels)
+
+    preserved = 0
+    for topic, body in _blocks(brief_md, new_tlevel):
+        topic = _CANONICAL_TOPIC.get(topic.strip(), topic.strip())
+        if topic not in _ALL_TOPIC_NAMES:
+            continue
+        subs = _blocks(body, new_tlevel + 1)
+        for title, sub_body in (subs if subs else [(topic, body)]):
+            old = old_index.get((topic, title.strip()))
+            if not old or old[1] is None:
+                continue
+            old_prose, old_checked_line = old
+            if _section_prose(sub_body) != old_prose:
+                continue
+            fresh_box = _REVIEWED_BOX_RE.search(sub_body)
+            if not fresh_box:
+                continue
+            brief_md = brief_md.replace(fresh_box.group(0), old_checked_line, 1)
+            preserved += 1
+    if preserved:
+        print(f"  Preserved reviewed-state on {preserved} unchanged section(s).")
+    return brief_md
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — SYNTHESIZE one topic (markdown, tag-cited)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1922,7 +2012,7 @@ def main(argv=None) -> None:
     outfile.write_text(brief, encoding="utf-8")
     print(f"Brief saved → {outfile.name}")
     if db.VAULT_TODAY_PATH and not args.no_vault:
-        db.insert_into_today(brief, Path(db.VAULT_TODAY_PATH))
+        db.insert_into_today(preserve_reviewed_state(brief), Path(db.VAULT_TODAY_PATH))
     # Mark read ONLY the emails that were briefed (relevant/synthesized). Off-domain
     # mail is LEFT UNREAD on purpose — the reader parks credit-card/student-loan/
     # philosophy mail in the inbox as a to-do list, and the brief must not touch it.
