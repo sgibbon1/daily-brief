@@ -52,4 +52,18 @@ cd "$SCRIPT_DIR"
 # — the earlier attempts' already-marked-read email was gone for good. Logging to
 # local disk removes the flush failure at the source, so a successful run reports
 # rc=0 and never gets cannibalized by a retry.
+#
+# Timestamped so this log alone answers "did it run, when, how many emails,
+# any errors" without cross-referencing resilient_run.sh's own
+# ~/Library/Logs/daily-brief.log (which has attempt/retry timestamps but none
+# of the run's actual content). Since resilient_run.sh introduced its own
+# internal ">> $LOG 2>&1" redirect around this whole script's invocation,
+# nothing this script or its children print reaches the launchd plist's
+# StandardOutPath/StandardErrorPath (~/scripts/daily_brief_launchd.log) any
+# more, however that path is configured -- every line is explicitly
+# redirected to a file path from inside the script before it would ever
+# reach an inherited stdout/stderr fd. That file is dead going forward;
+# this one is the place to look.
+echo "=== $(date '+%F %T') daily_brief_v2.py start ===" >> "$HOME/Library/Logs/daily-brief-detail.log"
 /usr/bin/python3 daily_brief_v2.py >> "$HOME/Library/Logs/daily-brief-detail.log" 2>&1
+echo "=== $(date '+%F %T') daily_brief_v2.py end (rc=$?) ===" >> "$HOME/Library/Logs/daily-brief-detail.log"
