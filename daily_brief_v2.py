@@ -581,23 +581,45 @@ def _prior_brief_text() -> tuple[str, str] | None:
     return None
 
 
-def _already_reviewed_today() -> set[str]:
-    """Titles the reader ticked off in TODAY's brief. On a same-day re-run the
-    carry-forward source is still yesterday's archive (where every box is
-    unchecked), so without this a box ticked this morning would pop right back."""
+def _already_reviewed_today() -> set[tuple[str, str]]:
+    """(topic, title) pairs the reader ticked off in TODAY's brief. On a
+    same-day re-run the carry-forward source is still yesterday's archive
+    (where every box is unchecked), so without this a box ticked this
+    morning would pop right back.
+
+    Scoped by (topic, title), NOT title alone. "Overview" and "Also noted"
+    are structurally guaranteed to repeat across topics — every topic whose
+    lead paragraph needs a synthetic heading gets its own "Overview"
+    (`_checkbox_body`), every topic with leftover uncited email gets its own
+    "Also noted" — so matching by bare title let ticking ONE topic's Overview
+    mark every OTHER topic's Overview as reviewed too. collect_carryover()
+    would then skip a still-unchecked "Overview" in a DIFFERENT topic
+    entirely, silently dropping its content from that day's carry-forward
+    without the reader ever having seen it. This isn't a rare same-day-rerun
+    edge case: Today.md already carries multiple topics' Overview/Also-noted
+    placeholders every day (from the 6am carry-forward), so ticking any one
+    of them during the day corrupts this set for all the others on the
+    normal, everyday path.
+    """
     if not db.VAULT_TODAY_PATH:
         return set()
     try:
         text = Path(db.VAULT_TODAY_PATH).read_text(encoding="utf-8")
     except Exception:
         return set()
-    done: set[str] = set()
-    heads = [(m.start(), m.group(2)) for m in _HEADING_RE.finditer(text)]
-    for i, (pos, title) in enumerate(heads):
+    heads = [(m.start(), len(m.group(1)), m.group(2)) for m in _HEADING_RE.finditer(text)]
+    topic_level = next((lv for _, lv, t in heads if t.strip() in _ALL_TOPIC_NAMES), None)
+    if topic_level is None:
+        return set()
+    done: set[tuple[str, str]] = set()
+    current_topic = ""
+    for i, (pos, lv, title) in enumerate(heads):
+        if lv == topic_level and title.strip() in _ALL_TOPIC_NAMES:
+            current_topic = _CANONICAL_TOPIC.get(title.strip(), title.strip())
         stop = heads[i + 1][0] if i + 1 < len(heads) else len(text)
         box = _REVIEWED_BOX_RE.search(text[pos:stop])
         if box and box.group(1).lower() == "x":
-            done.add(title.strip())
+            done.add((current_topic, title.strip()))
     return done
 
 
@@ -649,7 +671,7 @@ def collect_carryover() -> dict[str, list[dict]]:
         subs = _blocks(body, tlevel + 1)
         if subs:
             for sub_title, sub_body in subs:
-                if sub_title.strip() in reviewed:
+                if (topic.strip(), sub_title.strip()) in reviewed:
                     continue
                 box = _REVIEWED_BOX_RE.search(sub_body)
                 if not box or box.group(1).lower() == "x":
@@ -666,7 +688,7 @@ def collect_carryover() -> dict[str, list[dict]]:
                         "body": _shift_headings(cleaned, 3 - (tlevel + 1)),
                         "since": since})
         else:
-            if topic.strip() in reviewed:
+            if (topic.strip(), topic.strip()) in reviewed:
                 continue
             box = _REVIEWED_BOX_RE.search(body)
             if not box or box.group(1).lower() == "x":
