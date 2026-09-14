@@ -1068,6 +1068,66 @@ def _link_bare_source_names(md: str, emails: list[dict],
     return md
 
 
+def _repair_citation_drift(body: str, carried: list[dict] | None) -> str:
+    """Detect and repair a carried thread's citation getting swapped for a
+    DIFFERENT source's during merge.
+
+    Confirmed 2026-09-11 -> 09-13: a Jamestown Foundation paragraph ("Russia's
+    Declining Regional Influence and New Partnerships"), carried forward
+    across two days, had its citation replaced first by RIDDLE then by FT
+    Briefing -- both real, validly-linking sources, just not the one this
+    content actually came from. Traced to a THEMATICALLY ADJACENT sibling
+    subsection in the SAME topic call (a broader "Geopolitical Realignments in
+    Eurasia..." paragraph) legitimately citing that day's OTHER fresh source
+    on an overlapping theme; the model then bled that same citation into the
+    carried paragraph below it instead of keeping the link the carried text
+    already had embedded (SYNTH_SYSTEM tells it to keep a carried thread's own
+    links as-is; it isn't reliably doing that when a fresh sibling covers
+    similar ground in the same call). Neither `_apply_tags` nor
+    `_link_bare_source_names` catches this -- the model isn't leaving anything
+    bare, it's writing a fully-formed, validly-resolving citation to the WRONG
+    source, which is indistinguishable from a correct one without knowing
+    what the carried text originally cited.
+
+    For each carried item, find its DOMINANT original (name, url) pair --
+    the one cited most in its own pre-merge body, since a carried item is
+    typically single- or few-sourced -- and check whether that pair survived
+    AT ALL in the merged output's same-titled subsection. If it's gone
+    entirely and a DIFFERENT pair has taken over that subsection instead,
+    that absence + replacement is the drift signature: restore the original
+    pair throughout that subsection. A subsection that kept its original
+    citation (even alongside new, genuinely additional ones) is left alone —
+    this only fires on total replacement, not on legitimate expansion.
+    """
+    if not carried:
+        return body
+    for item in carried:
+        orig_links = _extract_named_links(item["body"])
+        if not orig_links:
+            continue
+        orig_name, orig_url = max(
+            orig_links.items(), key=lambda kv: item["body"].count(f"]({kv[1]})"))
+
+        for title, sub_body in _blocks(body, 3):
+            if title.strip() != item["title"].strip():
+                continue
+            if f"]({orig_url})" in sub_body:
+                break  # original citation survived intact -- no drift
+            new_links = _extract_named_links(sub_body)
+            if not new_links:
+                break  # nothing to compare against; leave it alone
+            wrong_name, wrong_url = next(iter(new_links.items()))
+            fixed = sub_body.replace(f"[{wrong_name}]({wrong_url})",
+                                     f"[{orig_name}]({orig_url})")
+            if fixed != sub_body and sub_body in body:
+                body = body.replace(sub_body, fixed, 1)
+                print(f"  ⚠ citation drift repaired in \"{item['title']}\": "
+                      f"was citing [{wrong_name}] instead of its carried "
+                      f"source [{orig_name}]")
+            break
+    return body
+
+
 def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
                      all_emails: list[dict] | None = None,
                      tagmap: dict[str, str] | None = None,
@@ -1117,6 +1177,7 @@ def synthesize_topic(topic: str, emails: list[dict], expanded: bool,
     body = _link_bare_source_names(body, all_emails or emails, extra_links)
     body = _repair_link_syntax(body)
     body = _strip_inline_bold(body)
+    body = _repair_citation_drift(body, carried)
     if missing:
         body += "\n\n### Also noted\n"
         for e in missing:
