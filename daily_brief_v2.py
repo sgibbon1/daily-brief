@@ -1346,6 +1346,16 @@ def _mask_links(md: str) -> tuple[str, dict]:
 
 
 def _unmask_links(md: str, store: dict) -> str:
+    # The compressor sometimes treats ⟦L#⟧ as code and wraps the citation in
+    # backticks — `[POLITICO's National Security Daily]⟦L12⟧` — which unmasked
+    # into a code-span holding a live link, so the vault showed the raw
+    # message:// URL instead of a clickable source. Peel the backticks first.
+    md = re.sub(r"`(\[[^\]]+\]⟦L\d+⟧)`", r"\1", md)
+    md = re.sub(r"`(⟦L\d+⟧)`", r"\1", md)
+    # A token can lose its closing bracket when the model's output is cut off
+    # mid-marker. Restore it so the URL can still be paired, rather than
+    # shipping a visible "⟦L41" into the brief.
+    md = re.sub(r"⟦L(\d+)(?!⟧)", r"⟦L\1⟧", md)
     for key, (text, url) in store.items():
         md = md.replace(f"[{text}]{key}", f"[{text}]({url})")
         md = md.replace(key, f"({url})")      # token survived without its text
@@ -1360,7 +1370,7 @@ def compress_section(topic: str, body: str, target_words: int,
             system=COMPRESS_SYSTEM,
             user=(f"TOPIC: {topic}\nWORD BUDGET: {target_words} words "
                   f"(currently {len(body.split())}).\n\nSECTION:\n\n{masked}"),
-            max_tokens=max(900, int(target_words * 2.2)), thinking_level="low",
+            max_tokens=max(1200, int(target_words * 3.2)), thinking_level="low",
             anthropic_model="claude-sonnet-4-6",
             project="daily_brief", script="daily_brief_v2.py", label="compress",
         ).strip()
@@ -1381,12 +1391,21 @@ def compress_section(topic: str, body: str, target_words: int,
                       f"{'restore detail you cut' if got < target_words else 'cut further'}. "
                       f"Same rules; keep every ⟦L#⟧ marker attached to its "
                       f"bracketed text.\n\nSECTION:\n\n{out}"),
-                max_tokens=max(900, int(target_words * 2.2)), thinking_level="low",
+                max_tokens=max(1200, int(target_words * 3.2)), thinking_level="low",
                 anthropic_model="claude-sonnet-4-6",
                 project="daily_brief", script="daily_brief_v2.py", label="compress-retry",
             ).strip() or out
         except Exception as exc:
             print(f"  ⚠ compression retry failed for {topic}: {exc}")
+
+    # A section cut off mid-sentence is worse than an over-long one: today's AI
+    # section shipped a paragraph ending "...requiring expertise from fields
+    # like nuclear power ⟦L41", because the model hit max_tokens. Same
+    # philosophy as the citation guard below — keep the original rather than
+    # ship damaged prose.
+    if out and not re.search(r"[.!?)\"'”’\]]\s*$", out):
+        print(f"  ⚠ compression truncated for {topic} — keeping uncompressed section")
+        return body
 
     out = _unmask_links(out, link_store)
     out = _strip_generic_headings(out)
