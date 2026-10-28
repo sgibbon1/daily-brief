@@ -1808,7 +1808,11 @@ def assemble_brief(sections: dict[str, str], events: list[dict],
     carry = carry or {}
     seen_boxes: set = set()   # keeps every Reviewed box's text unique (Tasks plugin)
     out = [
-        title or f"# Daily Intelligence Brief — {now.strftime('%B %d, %Y')}", "",
+        # A --title given without its "# " would leave the brief with no H1,
+        # and insert_into_today only strips a leading H1 — so the title line
+        # would survive as body text in the vault copy.
+        (("# " + title.lstrip("# ")) if title
+         else f"# Daily Intelligence Brief — {now.strftime('%B %d, %Y')}"), "",
         f"*Generated {now.strftime('%H:%M')} | {n_relevant} relevant of {n_total} "
         f"emails{window_label} · trend synthesis*", "",
     ]
@@ -1969,7 +1973,13 @@ def main(argv=None) -> None:
     # gives every one of today's already-read emails a real routing decision, so
     # flagging them here would just be a false-positive echo of that).
     read_before: list[dict] = []
-    if not args.include_read and not args.backlog and not same_day_rescan:
+    # Also skipped for an EXPLICIT window (--after/--before): a catch-up run
+    # over past days sees the mail that earlier briefs already marked read
+    # and reports it as 'you read this before the run', which is a false
+    # positive — today's backlog pass listed 55 emails its own morning run
+    # had briefed hours earlier.
+    if (not args.include_read and not args.backlog and not same_day_rescan
+            and not (args.after or args.before)):
         read_before = find_read_before_fetch(service, extra)
         if read_before:
             print(f"  ⚠ {len(read_before)} trusted-source email(s) already read "
